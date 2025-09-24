@@ -1,0 +1,75 @@
+{
+    "version": 8,
+    "name": "stars",
+    "metadata": {
+        "mapbox:autocomposite": true,
+        "mapbox:thumb": "data:image/webp;base64,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",
+        "mapbox:uiParadigm": "global",
+        "mapbox:sdk-support": {
+            "js": "3.14.0",
+            "android": "11.14.0",
+            "ios": "11.14.0"
+        },
+        "mapbox:groups": {}
+    },
+    "center": [-34, 38],
+    "zoom": 2,
+    "lights": [],
+    "terrain": {
+        "source": "mapbox-dem",
+        "exaggeration": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            6,
+            0,
+            7,
+            1,
+            12,
+            1,
+            13.7,
+            0
+        ]
+    },
+    "fog": {
+        "vertical-range": [20, 80],
+        "space-color": "hsl(0, 0%, 0%)",
+        "horizon-blend": 0.15,
+        "star-intensity": 0.3,
+        "color": "hsl(295, 70%, 25%)",
+        "range": [0, 15],
+        "high-color": "hsl(0, 0%, 0%)"
+    },
+    "imports": [
+        {
+            "id": "basemap",
+            "url": "mapbox://styles/mapbox/standard",
+            "config": {
+                "theme": "default",
+                "lightPreset": "night",
+                "showPlaceLabels": true,
+                "showRoadLabels": false,
+                "showPointOfInterestLabels": false,
+                "showTransitLabels": false
+            }
+        }
+    ],
+    "sources": {
+        "mapbox-dem": {
+            "url": "mapbox://mapbox.mapbox-terrain-dem-v1",
+            "type": "raster-dem",
+            "tileSize": 512
+        }
+    },
+    "sprite": "mapbox://sprites/kiloworld/cmfr10u8c00e101ryevk52bns/b8fjw435hx85pp7j172f016pl",
+    "glyphs": "mapbox://fonts/mapbox/{fontstack}/{range}.pbf",
+    "projection": {"name": "globe"},
+    "layers": [],
+    "created": "2025-09-19T16:00:50.700Z",
+    "modified": "2025-09-19T18:37:21.360Z",
+    "id": "cmfr10u8c00e101ryevk52bns",
+    "owner": "kiloworld",
+    "visibility": "private",
+    "protected": false,
+    "draft": false
+}

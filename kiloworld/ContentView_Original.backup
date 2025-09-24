@@ -1,0 +1,2505 @@
+//
+//  ContentView.swift
+//  kiloworld
+//
+//  Created by Ed Filowat on 9/6/25.
+//
+
+import SwiftUI
+import Metal
+import MetalKit
+import FirebaseDatabase
+import MapboxMaps
+import Turf
+import CoreLocation
+import os
+
+struct ContentView: View {
+    @State private var messageText = ""
+    @State private var currentXid: String? = nil
+    @State private var sessionXid: String? = nil
+    @State private var statusText = ""
+    @State private var chatMessages: [ChatMessage] = []
+    @State private var generatedImages: [String] = []
+    @State private var isListening = false
+    @State private var depthAmount: Float = 0.9
+    @State private var globalSize: Float = 0.1
+    
+    // Synthesizer controls
+    @State private var wavetablePosition: Float = 0.0
+    @State private var filterCutoff: Float = 8000.0
+    @State private var synthVolume: Float = 0.5
+    @State private var lfoRate: Float = 2.0
+    @State private var synthEnabled: Bool = false
+    
+    // Map controls - trigger map updates
+    @State private var mapPitch: Double = 65.0  // Start at minimum pitch
+    @State private var baseZoom: Double = 0.5   // User-controlled base zoom
+    @State private var mapBearing: Double = 0.0
+    @State private var particlesHidden: Bool = false
+    @State private var mapUpdateTrigger: Bool = false
+    @State private var gestureStartZoom: Double = 0.5
+    
+    // Actual camera values from Mapbox
+    @State private var actualZoom: Double = 10.0
+    @State private var actualPitch: Double = 85.0
+    @State private var actualCenter: CLLocationCoordinate2D = CLLocationCoordinate2D(latitude: 40.7589, longitude: -73.9851)
+    @State private var actualBearing: Double = 0.0
+    
+    // Energy tracking (total walking distance)
+    @State private var totalWalkingDistance: Double = 0.0
+    
+    // Flag to allow explicit viewport updates (e.g. location button, initial setup)
+    @State private var allowViewportUpdate: Bool = true // Start true to apply initial settings
+    
+    // User modal state
+    @State private var showUserModal: Bool = false
+    
+    // Location manager
+    @StateObject private var locationManager = LocationManager()
+    
+    // Path tracking
+    @State private var userPath: [CLLocationCoordinate2D] = []
+    @State private var isTrackingPath: Bool = false
+    
+    // Viewport for reactive camera updates - start with good defaults that will be applied
+    @State private var viewport: Viewport = .camera(center: CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194), zoom: 15.0, bearing: 0.0, pitch: 85.0)
+    
+    
+    // Track active synth notes for proper note-off - support polyphony
+    @State private var activeSynthNotes: [Int: Int] = [:] // Map note numbers to voice IDs
+    @State private var nextVoiceID: Int = 0
+    
+    // Track active sky touches from SkyGateRecognizer
+    @State private var activeSkyTouches: Int = 0
+    
+    
+    
+    private var optimalPitch: Double {
+        // Simple zoom-to-pitch mapping
+        // Below 5: always 65°
+        // 5-6: linear interpolation from 65° to 85°
+        // Above 6: always 85°
+        
+        let zoom = actualZoom
+        let pitch: Double
+        
+        if zoom <= 5.0 {
+            pitch = 65.0
+        } else if zoom >= 6.0 {
+            pitch = 85.0
+        } else {
+            // Linear interpolation between 5-6 zoom
+            let t = (zoom - 5.0) / (6.0 - 5.0) // 0.0 to 1.0
+            pitch = 65.0 + (t * (85.0 - 65.0)) // 65° to 85°
+        }
+        
+        print("[map] 🎯 ZOOM-TO-PITCH: zoom=\(String(format: "%.2f", zoom)), optimal_pitch=\(String(format: "%.1f", pitch))°")
+        return pitch
+    }
+    
+    private let database = Database.database().reference()
+    
+    // Mapbox custom style URL
+    private var customStyleURL: URL {
+        guard let styleURL = Bundle.main.url(forResource: "style", withExtension: "json") else {
+            fatalError("Could not find style.json in bundle")
+        }
+        return styleURL
+    }
+    
+    private var metalSynth: MetalWavetableSynth? = {
+        print("🔧 ContentView: Initializing MetalWavetableSynth...")
+        guard let device = MTLCreateSystemDefaultDevice() else { 
+            print("❌ ContentView: Failed to create Metal device")
+            return nil 
+        }
+        print("✅ ContentView: Metal device available: \(device.name)")
+        let synth = MetalWavetableSynth(device: device)
+        if synth != nil {
+            print("✅ ContentView: MetalWavetableSynth created successfully")
+        } else {
+            print("❌ ContentView: MetalWavetableSynth initialization failed")
+        }
+        return synth
+    }()
+    
+    // Neon Grid MapView using UIKit approach
+    private var mapboxMapView: some View {
+        NeonGridMapView(
+            viewport: $viewport,
+            allowViewportUpdate: allowViewportUpdate,
+            userPath: userPath,
+            onCameraChanged: { cameraState in
+                // Minimal updates only to prevent feedback loops
+                actualZoom = cameraState.zoom
+                actualPitch = cameraState.pitch
+                
+                // Check if pitch needs adjustment based on zoom
+                let optimalPitch = self.optimalPitch
+                let pitchDifference = abs(cameraState.pitch - optimalPitch)
+                if pitchDifference > 5.0 { // Only adjust if significantly different
+                    print("[map] 🎯 Pitch needs adjustment: current=\(String(format: "%.1f", cameraState.pitch))°, optimal=\(String(format: "%.1f", optimalPitch))°")
+                    // TODO: Apply pitch adjustment via direct mapView call instead of viewport
+                }
+            },
+            onMapLoaded: {
+                print("[map] 🗺️ Neon Grid Map loaded - Setting up SkyGateRecognizer")
+                // We'll set up SkyGateRecognizer in the UIViewRepresentable
+            },
+            metalSynth: metalSynth,
+            onSkyTouchCountChanged: { count in
+                activeSkyTouches = count
+            }
+        )
+    }
+    var body: some View {
+        ZStack {
+            // Just the map, nothing else
+            mapboxMapView
+                .ignoresSafeArea()
+            
+            // Debug overlay in top left + user icon in top right
+            VStack {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("ZOOM: \(String(format: "%.2f", actualZoom))")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.white)
+                        Text("PITCH: \(String(format: "%.1f", actualPitch))°")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.white)
+                        Text("SYNTH: \(activeSkyTouches) notes")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.white)
+                        Text("ENERGY: \(String(format: "%.0f", calculateWalkingDistance()))m")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.green)
+                        Text("PATH: \(userPath.count) pts")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.white)
+                    }
+                    .padding(8)
+                    .background(Color.black.opacity(0.7))
+                    .cornerRadius(6)
+                    
+                    Spacer()
+                    
+                    // User icon button
+                    Button(action: {
+                        showUserModal = true
+                    }) {
+                        Image(systemName: "person.circle.fill")
+                            .font(.system(size: 24))
+                            .foregroundColor(.white)
+                    }
+                    .padding(8)
+                    .background(Color.black.opacity(0.7))
+                    .clipShape(Circle())
+                    .shadow(color: .black.opacity(0.3), radius: 3, x: 0, y: 1)
+                }
+                Spacer()
+            }
+            .padding(.top, 50)
+            .padding(.leading, 12)
+            .padding(.trailing, 12)
+            
+            // Hide Mapbox logo with overlay
+            VStack {
+                Spacer()
+                HStack {
+                    Rectangle()
+                        .fill(Color.black)
+                        .frame(width: 80, height: 20)
+                        .cornerRadius(4)
+                    Spacer()
+                }
+                .padding(.bottom, 8)
+                .padding(.leading, 8)
+            }
+            
+            // Bottom row: Location button + Chat input + Send button
+            VStack {
+                Spacer()
+                
+                HStack(spacing: 12) {
+                    // Location button - pan/zoom to current location
+                    Button(action: {
+                        print("[map] 📍 ZOOM TO CURRENT LOCATION")
+                        zoomToUserLocation()
+                    }) {
+                        VStack(spacing: 2) {
+                            Image(systemName: "location.fill")
+                                .font(.system(size: 16))
+                                .foregroundColor(.white)
+                        }
+                        .frame(width: 44, height: 44)
+                        .background(Color.blue)
+                        .clipShape(Circle())
+                        .shadow(color: .black.opacity(0.3), radius: 3, x: 0, y: 1)
+                    }
+                    
+                    // Chat input field
+                    TextField("Message...", text: $messageText)
+                        .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .frame(height: 44)
+                    
+                    // Send button
+                    Button("Send") {
+                        print("[chat] Send button tapped: \(messageText)")
+                        sendMessage()
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(Color.blue)
+                    .cornerRadius(8)
+                    .frame(height: 44)
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8) // As low as possible
+            }
+        }
+        .sheet(isPresented: $showUserModal) {
+            UserModalView()
+        }
+        .onAppear {
+            print("[map] 🏁 App appeared - requesting location permission")
+            locationManager.requestLocationPermission()
+            setupAlwaysOnPathTracking()
+            
+            // Try to start at user location if available
+            if let userLocation = locationManager.currentLocation {
+                print("[map] 📍 Starting at user location: \(userLocation.coordinate)")
+                allowViewportUpdate = true
+                viewport = .camera(center: userLocation.coordinate, zoom: 15.0, bearing: 0.0, pitch: 85.0)
+            }
+            
+            // Disable viewport updates after initial setup to prevent snap-back
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                allowViewportUpdate = false
+                print("[map] 🔒 Viewport updates disabled after initial setup")
+            }
+        }
+    }
+    
+    private func sendMessage() {
+        guard !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        
+        let userMessage = messageText
+        
+        // Use existing session ID or create a new one
+        if sessionXid == nil {
+            sessionXid = "exhibit-\(UUID().uuidString.prefix(8))"
+        }
+        let xid = sessionXid!
+        
+        // Add user message to chat
+        chatMessages.append(ChatMessage(role: "user", content: userMessage))
+        messageText = ""
+        
+        // Start Firebase listeners
+        currentXid = xid
+        isListening = true
+        statusText = "Sending message..."
+        
+        //"http://192.168.40.34:3000/talk"
+        let url = URL(string: "http://172.20.10.5:3000/talk")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 10
+        
+        let payload = [
+            "xid": xid,
+            "text": userMessage,
+            "messages": [["role": "user", "content": userMessage]],
+            "user": [
+                "id": "ios-user-42",
+                "selfies": [],
+                "aspectRatioString": "21:9"
+            ]
+        ] as [String: Any]
+        
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        } catch {
+            print("Error serializing JSON: \(error)")
+            statusText = "Error sending message"
+            isListening = false
+            return
+        }
+        
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            if let error = error {
+                print("Network error: \(error)")
+                DispatchQueue.main.async {
+                    statusText = "Network error"
+                    isListening = false
+                }
+                return
+            }
+            
+            if let data = data, let responseString = String(data: data, encoding: .utf8) {
+                print("Response: \(responseString)")
+            }
+        }.resume()
+    }
+    
+    private func setupFirebaseListeners(xid: String) {
+        print("Setting up Firebase listeners for xid: \(xid)")
+        let currentUserId = "ios-user-42" // Match the user ID we send in the API call
+        
+        // 1. Listen for chat history in /exhibits/{xid}/messages
+        let messagesRef = database.child("exhibits").child(xid).child("messages")
+        messagesRef.observe(.childAdded) { [self] snapshot in
+            guard let messageData = snapshot.value as? [String: Any],
+                  let mode = messageData["mode"] as? String,
+                  let message = messageData["message"] as? String else {
+                print("Invalid message data: \(snapshot.value ?? "nil")")
+                return
+            }
+            
+            DispatchQueue.main.async {
+                // Only add if we don't already have this message
+                if !chatMessages.contains(where: { $0.content == message && $0.role == mode }) {
+                    chatMessages.append(ChatMessage(role: mode, content: message))
+                    print("Added \(mode) message: \(message)")
+                }
+            }
+        }
+        
+        // 2. Listen for editObject changes for status + images
+        let editObjectRef = database.child("exhibits").child(xid).child("editObject")
+        editObjectRef.observe(.value) { [self] snapshot in
+            guard let editData = snapshot.value as? [String: Any],
+                  let edits = editData["edits"] as? [[String: Any]] else {
+                print("No edits found in editObject: \(snapshot.value ?? "nil")")
+                return
+            }
+            
+            // 3. Find our user's edit
+            guard let userEdit = edits.first(where: { edit in
+                (edit["userId"] as? String) == currentUserId
+            }) else {
+                print("No edit found for user: \(currentUserId)")
+                return
+            }
+            
+            DispatchQueue.main.async {
+                // 4. Render status from edit.status
+                if let status = userEdit["status"] as? String {
+                    statusText = status
+                    print("Status update: \(status)")
+                }
+                
+                // 5. Render images from edit.item.layers[].url
+                if let item = userEdit["item"] as? [String: Any],
+                   let layers = item["layers"] as? [[String: Any]] {
+                    
+                    let newImageUrls = layers.compactMap { $0["url"] as? String }
+                    
+                    // Add new images that we don't already have
+                    for imageUrl in newImageUrls {
+                        if !generatedImages.contains(imageUrl) {
+                            generatedImages.append(imageUrl)
+                            print("Added image URL: \(imageUrl)")
+                        }
+                    }
+                }
+                
+                // Keep listening for ongoing conversations and new image generations
+            }
+        }
+        
+        print("Firebase listeners set up successfully")
+    }
+    
+    // Helper function for note names
+    private func noteToString(_ noteNumber: Int) -> String {
+        let noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+        let octave = (noteNumber / 12) - 1
+        let noteName = noteNames[noteNumber % 12]
+        return "\(noteName)\(octave)"
+    }
+    
+    // New individual note tracking system
+    private func startSynthNote(at location: CGPoint) -> Int {
+        guard let metalSynth = metalSynth else { return -1 }
+        
+        // Convert location to normalized coordinates (0-1)
+        let screenBounds = UIScreen.main.bounds
+        let x = Float(location.x / screenBounds.width)
+        let y = Float(location.y / screenBounds.height)
+        
+        // Calculate note from position
+        let midiNote = calculateNoteFromPosition(x: x, y: y)
+        
+        // Start note and track it
+        metalSynth.noteOn(noteNumber: midiNote, velocity: Float(0.5 + x * 0.4), wavetablePosition: x)
+        
+        let voiceID = nextVoiceID
+        nextVoiceID += 1
+        activeSynthNotes[voiceID] = midiNote
+        
+        print("🎹 STARTED: Note \(midiNote), Voice \(voiceID)")
+        return voiceID
+    }
+    
+    private func endSynthNote(voiceID: Int) {
+        guard let metalSynth = metalSynth else { return }
+        
+        if let midiNote = activeSynthNotes[voiceID] {
+            metalSynth.noteOff(noteNumber: midiNote)
+            activeSynthNotes.removeValue(forKey: voiceID)
+            print("🎹 ENDED: Note \(midiNote), Voice \(voiceID)")
+        }
+    }
+    
+    private func endAllSynthNotes() {
+        guard let metalSynth = metalSynth else { return }
+        
+        for (voiceID, midiNote) in activeSynthNotes {
+            metalSynth.noteOff(noteNumber: midiNote)
+            print("🎹 ENDED ALL: Note \(midiNote), Voice \(voiceID)")
+        }
+        activeSynthNotes.removeAll()
+    }
+    
+    private func calculateNoteFromPosition(x: Float, y: Float) -> Int {
+        // Same celestial scale logic as in Metal view
+        let celestialScale = [0, 2, 4, 7, 9] // Pentatonic major
+        let baseNote = 60 // Middle C
+        
+        // Y controls octave shift
+        let octaveShift = Int((1.0 - y) * 24.0 - 12.0) // Range: -12 to +12 semitones
+        
+        // X selects note within scale
+        let scaleIndex = Int(x * Float(celestialScale.count - 1))
+        let noteOffset = celestialScale[scaleIndex]
+        
+        let midiNote = baseNote + octaveShift + noteOffset
+        return max(0, min(127, midiNote))
+    }
+    
+    // Function to update viewport pitch only, preserving current camera state
+    private func updateViewportPitch(to newPitch: Double) {
+        // Use current viewport center (where user has panned), not user location
+        let currentCenter = viewport.camera?.center ?? actualCenter
+        let currentZoom = actualZoom // Use actual zoom from Mapbox
+        let currentBearing = actualBearing // Use actual bearing from Mapbox
+        
+        let newViewport = Viewport.camera(
+            center: currentCenter,
+            zoom: currentZoom,
+            bearing: currentBearing,
+            pitch: newPitch
+        )
+        
+        print("[map] 🎥 UPDATING PITCH ONLY: \(String(format: "%.1f", actualPitch))° → \(String(format: "%.1f", newPitch))° (preserving center, zoom=\(String(format: "%.2f", currentZoom)), bearing=\(String(format: "%.1f", currentBearing)))")
+        viewport = newViewport
+    }
+    
+    // Calculate total walking distance from the green path (energy)
+    private func calculateWalkingDistance() -> Double {
+        guard userPath.count >= 2 else { return 0.0 }
+        
+        var totalDistance: Double = 0.0
+        
+        for i in 1..<userPath.count {
+            let previousLocation = CLLocation(latitude: userPath[i-1].latitude, longitude: userPath[i-1].longitude)
+            let currentLocation = CLLocation(latitude: userPath[i].latitude, longitude: userPath[i].longitude)
+            let distance = previousLocation.distance(from: currentLocation) // Distance in meters
+            totalDistance += distance
+        }
+        
+        return totalDistance
+    }
+    
+    // Function to zoom to user's current location
+    private func zoomToUserLocation() {
+        locationManager.requestLocation()
+        
+        guard let userLocation = locationManager.currentLocation else {
+            print("[map] 📍 No user location available")
+            return
+        }
+        
+        // Allow this viewport update since it's user-initiated
+        allowViewportUpdate = true
+        
+        let newViewport = Viewport.camera(
+            center: userLocation.coordinate,
+            zoom: 15.0, // Fixed zoom level 15
+            bearing: actualBearing,
+            pitch: 85.0 // High pitch for zoom level 15
+        )
+        
+        print("[map] 📍 ZOOMING TO USER LOCATION: \(userLocation.coordinate)")
+        viewport = newViewport
+        
+        // Reset flag after a brief delay to prevent accidental updates
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            allowViewportUpdate = false
+        }
+    }
+    
+    
+    // Add location to path
+    private func addLocationToPath(_ coordinate: CLLocationCoordinate2D) {
+        // Only add if it's a meaningful distance from last point (reduce noise)
+        if let lastPoint = userPath.last {
+            let lastLocation = CLLocation(latitude: lastPoint.latitude, longitude: lastPoint.longitude)
+            let newLocation = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+            let distance = lastLocation.distance(from: newLocation)
+            
+            // Only add if moved at least 2 meters
+            if distance > 2.0 {
+                userPath.append(coordinate)
+                print("[map] 🚶‍♂️ PATH POINT ADDED: \(userPath.count) total points, moved \(String(format: "%.1f", distance))m")
+            }
+        } else {
+            // First point
+            userPath.append(coordinate)
+            print("[map] 🎯 PATH STARTED at: \(coordinate)")
+        }
+    }
+    
+    // Handle generic tap (for fallback logging)
+    private func handleMapTap(at screenLocation: CGPoint) {
+        print("[map] 📱 SCREEN TAP: screen(\(Int(screenLocation.x)), \(Int(screenLocation.y)))")
+    }
+    
+    // Setup always-on path tracking for walking/running
+    private func setupAlwaysOnPathTracking() {
+        print("[map] 🏃‍♂️ Setting up always-on path tracking for walking/running")
+        
+        // Clear any existing path
+        userPath.removeAll()
+        
+        // Set up the location callback to automatically record all movement
+        locationManager.onLocationUpdate = { coordinate in
+            addLocationToPath(coordinate)
+        }
+        
+        print("[map] ✅ Always-on path tracking configured - will automatically record walking/running paths")
+    }
+    
+    // Setup SkyGateRecognizer for proper gesture blocking
+    private func setupSkyGateRecognizer(_ mapLoaded: MapLoaded) {
+        print("[map] 🚪 Setting up SkyGateRecognizer with MapLoaded")
+        
+        // We need to find the underlying MapView UIView
+        // In SwiftUI, we'll need to use a different approach
+        DispatchQueue.main.async {
+            self.findAndSetupGestureRecognizers(mapLoaded)
+        }
+    }
+    
+    private func findAndSetupGestureRecognizers(_ mapLoaded: MapLoaded) {
+        // Find the MapView by searching through the view hierarchy
+        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let window = windowScene.windows.first else {
+            print("[map] ❌ Could not find window")
+            return
+        }
+        
+        // Search for MapView in the view hierarchy
+        if let mapView = findMapView(in: window) {
+            print("[map] ✅ Found MapView: \(mapView)")
+            setupSkyGate(mapView: mapView, mapLoaded: mapLoaded)
+        } else {
+            print("[map] ❌ Could not find MapView in hierarchy")
+            // Retry after a short delay in case the view isn't ready yet
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self.findAndSetupGestureRecognizers(mapLoaded)
+            }
+        }
+    }
+    
+    private func findMapView(in view: UIView) -> UIView? {
+        // Look for MapView class name or similar
+        let className = String(describing: type(of: view))
+        print("[map] 🔍 Checking view class: \(className)")
+        
+        if className.contains("MapView") || className.contains("MBXMapView") || className.contains("GLKView") || className.contains("MTKView") {
+            print("[map] ✅ Found potential MapView: \(className)")
+            return view
+        }
+        
+        // Recursively search subviews
+        for subview in view.subviews {
+            if let found = findMapView(in: subview) {
+                return found
+            }
+        }
+        
+        return nil
+    }
+    
+    private func setupSkyGate(mapView: UIView, mapLoaded: MapLoaded) {
+        print("[map] 🎯 Setting up SkyGateRecognizer on MapView: \(String(describing: type(of: mapView)))")
+        print("[map] 🎯 MapView bounds: \(mapView.bounds)")
+        print("[map] 🎯 MapView userInteractionEnabled: \(mapView.isUserInteractionEnabled)")
+        
+        // Create the SkyGateRecognizer with synth reference
+        let gate = SkyGateRecognizer(mapLoaded: mapLoaded as AnyObject, metalSynth: metalSynth) { skyTouchCount in
+            print("[map] 🎵 Sky touch count changed (old function): \(skyTouchCount)")
+        }
+        print("[map] 🚪 Created SkyGateRecognizer: \(gate)")
+        
+        // Add it to the map view
+        mapView.addGestureRecognizer(gate)
+        print("[map] ✅ Added SkyGateRecognizer to MapView")
+        
+        // Try to find and configure Mapbox's gesture recognizers
+        let gestureRecognizers = mapView.gestureRecognizers ?? []
+        print("[map] 📝 Found \(gestureRecognizers.count) gesture recognizers on MapView")
+        
+        for (index, recognizer) in gestureRecognizers.enumerated() {
+            let name = String(describing: type(of: recognizer))
+            print("[map] 🔍 Gesture \(index): \(name)")
+            
+            // Make Mapbox gestures wait for the gate to fail
+            if name.contains("Pan") || name.contains("pan") {
+                recognizer.require(toFail: gate)
+                print("[map] ✅ Pan gesture configured to wait for SkyGate")
+            }
+            if name.contains("Pinch") || name.contains("pinch") || name.contains("Scale") {
+                recognizer.require(toFail: gate)
+                print("[map] ✅ Pinch gesture configured to wait for SkyGate")
+            }
+            if name.contains("Rotate") || name.contains("rotate") {
+                recognizer.require(toFail: gate)
+                print("[map] ✅ Rotation gesture configured to wait for SkyGate")
+            }
+        }
+        
+        // Also check superview for gesture recognizers
+        if let superview = mapView.superview {
+            let superGestures = superview.gestureRecognizers ?? []
+            print("[map] 📝 Found \(superGestures.count) gesture recognizers on superview")
+            for (index, recognizer) in superGestures.enumerated() {
+                let name = String(describing: type(of: recognizer))
+                print("[map] 🔍 Superview gesture \(index): \(name)")
+            }
+        }
+        
+        print("[map] 🎉 SkyGateRecognizer setup complete!")
+    }
+}
+
+// MARK: - SkyGateRecognizer
+final class SkyGateRecognizer: UIGestureRecognizer {
+    // Store reference as strong reference to prevent deallocation
+    private var mapLoaded: AnyObject?
+    private weak var metalSynth: MetalWavetableSynth?
+    
+    // Track active touches and their corresponding notes for polyphony
+    private var activeTouches: [UITouch: Int] = [:]
+    
+    // Callback to update ContentView with active touch count
+    private var onSkyTouchCountChanged: ((Int) -> Void)?
+    
+    // Celestial musical scale
+    private let celestialScale = [0, 2, 4, 7, 9] // Pentatonic major
+
+    init(mapLoaded: AnyObject, metalSynth: MetalWavetableSynth?, onSkyTouchCountChanged: @escaping (Int) -> Void) {
+        self.mapLoaded = mapLoaded
+        self.metalSynth = metalSynth
+        self.onSkyTouchCountChanged = onSkyTouchCountChanged
+        super.init(target: nil, action: nil)
+        
+        // Critical gesture properties for proper interception
+        cancelsTouchesInView = true     // Cancel touches for other gestures when we recognize
+        delaysTouchesBegan = false      // Don't delay - respond immediately
+        delaysTouchesEnded = false      // Don't delay end events
+        requiresExclusiveTouchType = false  // Allow all touch types
+        
+        print("[map] 🚪 SkyGateRecognizer initialized with mapLoaded: \(mapLoaded) and synth: \(metalSynth != nil ? "✅" : "❌")")
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        print("[map] 🚪 SkyGateRecognizer.touchesBegan called with \(touches.count) touches")
+        
+        guard let event = event, let view = view else {
+            print("[map] ❌ No event or view")
+            state = .failed
+            return
+        }
+
+        let allTouches = Array(event.allTouches ?? [])
+        print("[map] 📱 Processing \(allTouches.count) total touches")
+        
+        var anySky = false
+        var skyTouches: [UITouch] = []
+        
+        // Check each touch for sky/land using Mapbox coordinate querying
+        for touch in touches {
+            let point = touch.location(in: view)
+            
+            // Query Mapbox for features at this point - if no features returned, it's sky
+            guard let mapView = mapLoaded as? MapView else {
+                print("[map] ❌ No MapView available for feature querying")
+                continue
+            }
+            
+            // Use camera state and screen position to determine sky
+            let cameraState = mapView.mapboxMap.cameraState
+            let viewBounds = view.bounds
+            
+            // With high pitch (3D view), upper portion of screen shows sky
+            // Calculate sky threshold based on pitch angle
+            let pitch = cameraState.pitch
+            let skyThreshold: CGFloat
+            
+            if pitch > 60.0 {
+                // High pitch - more sky visible
+                skyThreshold = viewBounds.height * 0.5 // Top 50%
+            } else if pitch > 30.0 {
+                // Medium pitch - some sky
+                skyThreshold = viewBounds.height * 0.3 // Top 30%
+            } else {
+                // Low pitch - minimal sky
+                skyThreshold = viewBounds.height * 0.1 // Top 10%
+            }
+            
+            let isSky = point.y < skyThreshold
+            
+            print("[map] 🔍 Touch at \(point): \(isSky ? "☁️ SKY" : "🌍 LAND") (pitch: \(String(format: "%.1f", pitch))°, threshold: \(String(format: "%.0f", skyThreshold)), y: \(String(format: "%.0f", point.y)))")
+            
+            if isSky {
+                anySky = true
+                skyTouches.append(touch)
+                
+                // Start synth note for this sky touch
+                startSynthNote(for: touch, at: point, in: view)
+            }
+        }
+        
+        // If ANY touch is in sky, recognize to block map gestures
+        if anySky {
+            self.state = .began  // Start recognizing sky touches
+            print("[map] 🚪 SkyGate: BEGAN - Blocking map gestures for \(skyTouches.count) sky touches")
+            onSkyTouchCountChanged?(activeTouches.count)
+        } else {
+            self.state = .failed
+            print("[map] 🚪 SkyGate: FAILED - Allowing land touches")
+            onSkyTouchCountChanged?(0)
+        }
+    }
+    
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        print("[map] 🚪 SkyGateRecognizer.touchesMoved called with \(touches.count) touches, state: \(state.rawValue)")
+        guard let view = view else { return }
+        
+        // Update to recognized state if we're in began state
+        if state == .began {
+            state = .changed
+        }
+        
+        for touch in touches {
+            // Only handle touches that are already tracked as sky touches
+            if activeTouches[touch] != nil {
+                let point = touch.location(in: view)
+                updateSynthNote(for: touch, at: point, in: view)
+            }
+        }
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        print("[map] 🚪 SkyGateRecognizer.touchesEnded called with \(touches.count) touches, state: \(state.rawValue)")
+        
+        for touch in touches {
+            // End synth note for this touch if it was a sky touch
+            endSynthNote(for: touch)
+        }
+        
+        // If no more active touches, end the gesture
+        if activeTouches.isEmpty {
+            state = .ended
+            print("[map] 🚪 SkyGate: ENDED - No more sky touches")
+        }
+        onSkyTouchCountChanged?(activeTouches.count)
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        print("[map] 🚪 SkyGateRecognizer.touchesCancelled called with \(touches.count) touches, state: \(state.rawValue)")
+        
+        for touch in touches {
+            // End synth note for this touch if it was a sky touch
+            endSynthNote(for: touch)
+        }
+        state = .cancelled
+        onSkyTouchCountChanged?(activeTouches.count)
+    }
+    
+    // MARK: - Synth Integration
+    
+    private func startSynthNote(for touch: UITouch, at point: CGPoint, in view: UIView) {
+        guard let metalSynth = metalSynth else {
+            print("[map] ❌ No metalSynth available")
+            return
+        }
+        
+        // Convert touch position to normalized coordinates
+        let x = Float(point.x / view.bounds.width)   // 0.0 to 1.0
+        let y = Float(point.y / view.bounds.height)  // 0.0 to 1.0
+        
+        // Calculate MIDI note from position using celestial scale
+        let midiNote = calculateNoteFromPosition(x: x, y: y)
+        
+        // Start the note with per-touch wavetable position
+        let velocity = Float(0.5 + x * 0.4) // Velocity based on X position
+        metalSynth.noteOn(noteNumber: midiNote, velocity: velocity, wavetablePosition: x)
+        
+        // Track this touch locally
+        activeTouches[touch] = midiNote
+        
+        print("[map] 🎹 SKY TOUCH: Started note \(midiNote) at (\(String(format: "%.2f", x)), \(String(format: "%.2f", y))) - \(activeTouches.count) active")
+        print("[map] 🔊 MetalSynth noteOn called - check audio output!")
+    }
+    
+    private func updateSynthNote(for touch: UITouch, at point: CGPoint, in view: UIView) {
+        guard let metalSynth = metalSynth,
+              let originalNote = activeTouches[touch] else { return }
+        
+        // Convert touch position to normalized coordinates
+        let x = Float(point.x / view.bounds.width)
+        let y = Float(point.y / view.bounds.height)
+        
+        // Calculate target note for pitch bending
+        let targetNote = calculateNoteFromPosition(x: x, y: y)
+        let pitchBend = Float(targetNote - originalNote)
+        
+        // Update wavetable position and pitch bend for this specific note
+        metalSynth.updateNoteWavetablePosition(noteNumber: originalNote, wavetablePosition: x)
+        metalSynth.updateNotePitchBend(noteNumber: originalNote, pitchBend: pitchBend)
+        
+        print("[map] 🎛️ SKY MOVE: Note \(originalNote) bent by \(String(format: "%.2f", pitchBend)) semitones, wave=\(String(format: "%.2f", x))")
+    }
+    
+    private func endSynthNote(for touch: UITouch) {
+        guard let metalSynth = metalSynth else {
+            print("[map] ❌ No metalSynth for note release")
+            return
+        }
+        
+        guard let midiNote = activeTouches[touch] else {
+            print("[map] ⚠️ Touch not tracked for note release")
+            return
+        }
+        
+        metalSynth.noteOff(noteNumber: midiNote)
+        activeTouches.removeValue(forKey: touch)
+        
+        print("[map] 🎹 SKY RELEASE: Ended note \(midiNote) - \(activeTouches.count) remaining")
+    }
+    
+    private func calculateNoteFromPosition(x: Float, y: Float) -> Int {
+        let baseNote = 60 // Middle C
+        
+        // Y controls octave shift: top (y=0) = +12, bottom (y=1) = -12
+        let octaveShift = Int((1.0 - y) * 24.0 - 12.0) // Range: -12 to +12 semitones
+        
+        // X selects note within celestial scale
+        let scaleIndex = Int(x * Float(celestialScale.count - 1))
+        let noteOffset = celestialScale[scaleIndex]
+        
+        let midiNote = baseNote + octaveShift + noteOffset
+        return max(0, min(127, midiNote)) // Clamp to valid MIDI range
+    }
+}
+
+// MARK: - Polyphonic MTKView
+class PolyphonicMTKView: MTKView {
+    weak var coordinator: FullscreenMetalView.FullscreenCoordinator?
+    
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        print("🟢 PolyphonicMTKView.touchesBegan called with \(touches.count) touches")
+        coordinator?.handleTouchesBegan(touches, with: event, in: self)
+        
+        // Forward touches to the view behind (map)
+        if let parentView = self.superview {
+            parentView.touchesBegan(touches, with: event)
+        }
+    }
+    
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        print("🟡 PolyphonicMTKView.touchesMoved called with \(touches.count) touches")
+        coordinator?.handleTouchesMoved(touches, with: event, in: self)
+        
+        // Forward touches to the view behind (map)
+        if let parentView = self.superview {
+            parentView.touchesMoved(touches, with: event)
+        }
+    }
+    
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        print("🔴 PolyphonicMTKView.touchesEnded called with \(touches.count) touches")
+        coordinator?.handleTouchesEnded(touches, with: event, in: self)
+        
+        // Forward touches to the view behind (map)
+        if let parentView = self.superview {
+            parentView.touchesEnded(touches, with: event)
+        }
+    }
+    
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        print("❌ PolyphonicMTKView.touchesCancelled called with \(touches.count) touches")
+        coordinator?.handleTouchesEnded(touches, with: event, in: self)
+        
+        // Forward touches to the view behind (map)
+        if let parentView = self.superview {
+            parentView.touchesCancelled(touches, with: event)
+        }
+    }
+}
+
+// MARK: - Gesture Recognizer Delegate
+extension FullscreenMetalView.FullscreenCoordinator: UIGestureRecognizerDelegate {
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        print("🤏 Gesture delegate called: \(gestureRecognizer) vs \(otherGestureRecognizer)")
+        return true // Allow simultaneous gestures for now
+    }
+    
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        print("👆 Gesture should receive touch: \(gestureRecognizer)")
+        return true
+    }
+}
+
+struct FullscreenMetalView: UIViewRepresentable {
+    let imageUrls: [String]
+    let depthAmount: Float
+    let globalSize: Float
+    let metalSynth: MetalWavetableSynth?
+    
+    func makeUIView(context: Context) -> PolyphonicMTKView {
+        print("🔧 Creating PolyphonicMTKView...")
+        let mtkView = PolyphonicMTKView()
+        mtkView.device = MTLCreateSystemDefaultDevice()
+        mtkView.delegate = context.coordinator
+        mtkView.enableSetNeedsDisplay = true
+        mtkView.isPaused = false  // Enable continuous drawing for particle animation
+        mtkView.preferredFramesPerSecond = 60
+        mtkView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0) // Transparent background
+        mtkView.isOpaque = false // CRITICAL: Allow transparency
+        mtkView.backgroundColor = UIColor.clear // Clear background
+        // Enable depth buffer for proper depth testing
+        mtkView.depthStencilPixelFormat = .depth32Float
+        // Enable user interaction for gestures
+        mtkView.isUserInteractionEnabled = true
+        mtkView.isMultipleTouchEnabled = true  // Enable multi-touch
+        
+        // CRITICAL: Allow touches to pass through to views behind
+        mtkView.backgroundColor = UIColor.clear
+        mtkView.layer.backgroundColor = UIColor.clear.cgColor
+        
+        print("✅ PolyphonicMTKView created with multi-touch: \(mtkView.isMultipleTouchEnabled)")
+        
+        mtkView.coordinator = context.coordinator
+        context.coordinator.setMTKView(mtkView)
+        context.coordinator.setMetalSynth(metalSynth)
+        return mtkView
+    }
+    
+    func updateUIView(_ uiView: PolyphonicMTKView, context: Context) {
+        // Update parameters - debounce to prevent GPU choking
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            context.coordinator.setDepthAmount(depthAmount)
+            context.coordinator.setGlobalSize(globalSize)
+        }
+        
+        // Load the most recent image
+        print("FullscreenMetalView: updateUIView called with \(imageUrls.count) images")
+        if let latestImageUrl = imageUrls.last {
+            print("FullscreenMetalView: Loading latest image: \(latestImageUrl)")
+            context.coordinator.loadImage(from: latestImageUrl)
+        } else {
+            print("FullscreenMetalView: No images to display")
+        }
+    }
+    
+    func makeCoordinator() -> FullscreenCoordinator {
+        FullscreenCoordinator()
+    }
+    
+    class FullscreenCoordinator: NSObject, MTKViewDelegate {
+        private var device: MTLDevice?
+        private var commandQueue: MTLCommandQueue?
+        private var pipelineState: MTLRenderPipelineState?
+        private var texture: MTLTexture?
+        private var maskTexture: MTLTexture?
+        private weak var mtkView: MTKView?
+        private var particleSystem: ParticleDissolveSystem?
+        private var displayTimer: Timer?
+        private weak var metalSynth: MetalWavetableSynth?
+        
+        // Celestial musical scales
+        private let celestialScales = [
+            [0, 2, 4, 7, 9],           // Pentatonic major (ethereal)
+            [0, 3, 5, 7, 10],          // Pentatonic minor (mysterious)  
+            [0, 2, 3, 5, 7, 8, 10],    // Natural minor (melancholic)
+            [0, 2, 4, 6, 7, 9, 11],    // Lydian (dreamy, floating)
+            [0, 1, 4, 5, 7, 8, 11],    // Harmonic minor (exotic)
+            [0, 2, 4, 5, 7, 9, 10],    // Mixolydian (warm, celestial)
+            [0, 1, 3, 4, 6, 8, 10]     // Whole tone (spacey, ethereal)
+        ]
+        private var currentScaleIndex = 0
+        private var baseOctave = 4
+        private var activeTouches: [UITouch: Int] = [:] // Maps each touch to its MIDI note
+        private var currentTouchNote: Int? = nil // For single-touch compatibility
+        
+        // Gesture state  
+        private var currentZoomScale: Float = 2.0  // Start at 2x to make gestures more obvious
+        private var currentRotationX: Float = 0.0  // Vertical drag rotation (front-facing)
+        private var currentRotationY: Float = 0.0  // Horizontal drag rotation (front-facing)
+        
+        override init() {
+            super.init()
+            setupMetal()
+        }
+        
+        func setMTKView(_ view: MTKView) {
+            mtkView = view
+            setupGestures()
+            
+            // Load hardcoded image for testing
+            loadHardcodedImage()
+        }
+        
+        func setMetalSynth(_ synth: MetalWavetableSynth?) {
+            metalSynth = synth
+        }
+        
+        private func setupGestures() {
+            guard let mtkView = mtkView else { 
+                print("MTKView is nil, cannot setup gestures")
+                return 
+            }
+            
+            print("Setting up polyphonic touch interface on MTKView")
+            print("MTKView bounds: \(mtkView.bounds)")
+            print("MTKView user interaction: \(mtkView.isUserInteractionEnabled)")
+            print("MTKView multi-touch enabled: \(mtkView.isMultipleTouchEnabled)")
+            
+            // Remove all gesture recognizers to prevent conflicts with direct touch
+            for gestureRecognizer in mtkView.gestureRecognizers ?? [] {
+                mtkView.removeGestureRecognizer(gestureRecognizer)
+                print("🗑️ Removed gesture recognizer: \(gestureRecognizer)")
+            }
+            
+            print("✅ Polyphonic touch interface enabled - using direct touch events only")
+            print("   - Multi-touch: \(mtkView.isMultipleTouchEnabled)")
+            print("   - User interaction: \(mtkView.isUserInteractionEnabled)")
+        }
+        
+        @objc private func handleSimpleTap(_ gesture: UITapGestureRecognizer) {
+            print("🚀 SIMPLE TAP DETECTED!")
+            
+            guard let metalSynth = metalSynth else { 
+                print("❌ MetalSynth is nil in handleSimpleTap")
+                return 
+            }
+            
+            guard let view = gesture.view else { 
+                print("❌ Gesture view is nil")
+                return 
+            }
+            
+            let location = gesture.location(in: view)
+            print("👆 Tap location: \(location) in view bounds: \(view.bounds)")
+            
+            // Play a simple test note
+            let testNote = 60 // Middle C
+            print("🎹 Playing test note \(testNote)")
+            metalSynth.noteOn(noteNumber: testNote, velocity: 0.5)
+            
+            // Auto note-off after 1 second
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                print("🎹 Note off for test note \(testNote)")
+                metalSynth.noteOff(noteNumber: testNote)
+            }
+        }
+        
+        @objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+            switch gesture.state {
+            case .began:
+                print("Pinch gesture began")
+            case .changed:
+                currentZoomScale *= Float(gesture.scale)
+                currentZoomScale = max(0.5, min(currentZoomScale, 3.0)) // Limit scale between 0.5x and 3x
+                gesture.scale = 1.0 // Reset gesture scale
+                particleSystem?.setScale(currentZoomScale)
+                print("Scale updated to: \(currentZoomScale)")
+            case .ended:
+                print("Pinch gesture ended")
+            default:
+                break
+            }
+        }
+        
+        @objc private func handleCelestialTap(_ gesture: UITapGestureRecognizer) {
+            guard let metalSynth = metalSynth else { 
+                print("❌ MetalSynth is nil in handleCelestialTap")
+                return 
+            }
+            guard let view = gesture.view else { return }
+            
+            let location = gesture.location(in: view)
+            let viewSize = view.bounds.size
+            
+            // Map touch position to musical parameters
+            let x = Float(location.x / viewSize.width)  // 0.0 to 1.0
+            let y = Float(location.y / viewSize.height) // 0.0 to 1.0
+            
+            print("✨ Celestial TAP at x=\(String(format: "%.3f", x)), y=\(String(format: "%.3f", y))")
+            
+            // X controls wavetable position
+            metalSynth.setWavetablePosition(x)
+            
+            // Y controls pitch within the celestial scale (top = high, bottom = low)
+            let scale = celestialScales[currentScaleIndex]
+            let pitchRange: Float = 2.5 // Cover 2.5 octaves
+            let invertedY = 1.0 - y // Invert Y (top = high)
+            let scaleCount = Float(scale.count)
+            let scaleDegree = Int(invertedY * scaleCount * pitchRange)
+            let octaveShift = scaleDegree / scale.count
+            let noteInScale = scaleDegree % scale.count
+            let midiNote = 36 + (baseOctave * 12) + (octaveShift * 12) + scale[noteInScale]
+            
+            // Filter cutoff based on vertical position
+            let filterCutoff = 400.0 + (1.0 - y) * 12000.0
+            metalSynth.setFilterCutoff(Float(filterCutoff))
+            
+            // Play the celestial note
+            let velocity = 0.3 + (x * 0.4)
+            metalSynth.noteOn(noteNumber: midiNote, velocity: Float(velocity))
+            
+            // Auto note-off after 1 second
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                metalSynth.noteOff(noteNumber: midiNote)
+            }
+            
+            print("🎵 Celestial tap: Note=\(midiNote), Wave=\(String(format: "%.2f", x)), Filter=\(Int(filterCutoff))")
+        }
+        
+        @objc private func handleCelestialPan(_ gesture: UIPanGestureRecognizer) {
+            guard let metalSynth = metalSynth else { 
+                print("❌ MetalSynth is nil in handleCelestialPan")
+                return 
+            }
+            guard let view = gesture.view else { return }
+            
+            let location = gesture.location(in: view)
+            let viewSize = view.bounds.size
+            let x = Float(location.x / viewSize.width)  // 0.0 to 1.0
+            let y = Float(location.y / viewSize.height) // 0.0 to 1.0
+            
+            switch gesture.state {
+            case .began:
+                print("✨ Celestial PAN began at x=\(String(format: "%.3f", x)), y=\(String(format: "%.3f", y))")
+                
+                // Start playing note based on touch position
+                currentTouchNote = calculateNoteFromPosition(x: x, y: y)
+                metalSynth.setWavetablePosition(x)
+                metalSynth.setFilterCutoff(Float(400.0 + (1.0 - y) * 12000.0))
+                metalSynth.noteOn(noteNumber: currentTouchNote!, velocity: Float(0.5 + x * 0.4)) // Fixed volume
+                
+                print("🎹 Started note \(currentTouchNote!) at touch begin")
+                
+            case .changed:
+                // Update parameters as user drags
+                metalSynth.setWavetablePosition(x)
+                metalSynth.setFilterCutoff(Float(400.0 + (1.0 - y) * 12000.0))
+                
+                // Calculate new note based on position
+                let newNote = calculateNoteFromPosition(x: x, y: y)
+                if let oldNote = currentTouchNote, newNote != oldNote {
+                    // Note changed - turn off old note and start new one
+                    metalSynth.noteOff(noteNumber: oldNote)
+                    metalSynth.noteOn(noteNumber: newNote, velocity: Float(0.5 + x * 0.4)) // Fixed volume
+                    currentTouchNote = newNote
+                    print("🎵 Note changed from \(oldNote) to \(newNote)")
+                }
+                
+            case .ended, .cancelled:
+                print("✨ Celestial PAN ended")
+                // Turn off the current note
+                if let note = currentTouchNote {
+                    metalSynth.noteOff(noteNumber: note)
+                    print("🎹 Note OFF: \(note) (finger lifted)")
+                    currentTouchNote = nil
+                }
+                // Reset wavetable position to stop the emergency fallback tone
+                metalSynth.setWavetablePosition(0.0)
+                print("🔇 Wavetable position reset to 0.0 - tone should stop")
+                
+            default:
+                break
+            }
+        }
+        
+        private func calculateNoteFromPosition(x: Float, y: Float) -> Int {
+            // Y controls pitch: top = octave higher, bottom = octave lower
+            let scale = celestialScales[currentScaleIndex]
+            let baseNote = 60 // Middle C (C4)
+            
+            // Map Y position to octave shift: top (y=0) = +12, bottom (y=1) = -12
+            let octaveShift = Int((1.0 - y) * 24.0 - 12.0) // Range: -12 to +12 semitones
+            
+            // Use X position to select note within scale
+            let scaleIndex = Int(x * Float(scale.count - 1))
+            let noteOffset = scale[scaleIndex]
+            
+            let midiNote = baseNote + octaveShift + noteOffset
+            return max(0, min(127, midiNote)) // Clamp to valid MIDI range
+        }
+        
+        private func handleCelestialTouchMovement(_ gesture: UIPanGestureRecognizer, view: UIView) {
+            guard let metalSynth = metalSynth else { return }
+            
+            let location = gesture.location(in: view)
+            let viewSize = view.bounds.size
+            
+            let x = Float(location.x / viewSize.width)
+            let y = Float(location.y / viewSize.height)
+            
+            // Update wavetable position
+            metalSynth.setWavetablePosition(x)
+            
+            // Update filter
+            let filterCutoff = 400.0 + (1.0 - y) * 12000.0
+            metalSynth.setFilterCutoff(Float(filterCutoff))
+        }
+        
+        // MARK: - Polyphonic Touch Handling
+        
+        func handleTouchesBegan(_ touches: Set<UITouch>, with event: UIEvent?, in view: UIView) {
+            print("🎵 handleTouchesBegan called with \(touches.count) touches")
+            
+            guard let metalSynth = metalSynth else { 
+                print("❌ MetalSynth is nil in handleTouchesBegan")
+                return 
+            }
+            
+            for touch in touches {
+                let location = touch.location(in: view)
+                let viewSize = view.bounds.size
+                let x = Float(location.x / viewSize.width)
+                let y = Float(location.y / viewSize.height)
+                
+                print("👆 Touch location: (\(String(format: "%.3f", x)), \(String(format: "%.3f", y))) in view \(viewSize)")
+                
+                // Calculate note for this touch position
+                let midiNote = calculateNoteFromPosition(x: x, y: y)
+                
+                // Start note immediately on touch down with per-voice wavetable position
+                // metalSynth.setFilterCutoff(Float(400.0 + (1.0 - y) * 12000.0)) // DISABLED for debugging
+                metalSynth.noteOn(noteNumber: midiNote, velocity: Float(0.5 + x * 0.4), wavetablePosition: x)
+                
+                // Track this touch
+                activeTouches[touch] = midiNote
+                
+                print("🎹 Touch \(activeTouches.count) began: Note \(midiNote) ON at (\(String(format: "%.2f", x)), \(String(format: "%.2f", y)))")
+                print("🎛️ Updated: Wave=\(String(format: "%.2f", x)), Filter=\(Int(400.0 + (1.0 - y) * 12000.0))Hz")
+            }
+        }
+        
+        func handleTouchesMoved(_ touches: Set<UITouch>, with event: UIEvent?, in view: UIView) {
+            guard let metalSynth = metalSynth else { return }
+            
+            for touch in touches {
+                guard let originalNote = activeTouches[touch] else { continue }
+                
+                let location = touch.location(in: view)
+                let viewSize = view.bounds.size
+                let x = Float(location.x / viewSize.width)
+                let y = Float(location.y / viewSize.height)
+                
+                // Calculate what note this Y position would naturally play
+                let targetNote = calculateNoteFromPosition(x: x, y: y)
+                
+                // Calculate pitch bend: difference between original note and target note
+                let pitchBend = Float(targetNote - originalNote)
+                
+                // Update wavetable position and pitch bend
+                metalSynth.updateNoteWavetablePosition(noteNumber: originalNote, wavetablePosition: x)
+                metalSynth.updateNotePitchBend(noteNumber: originalNote, pitchBend: pitchBend)
+            }
+        }
+        
+        func handleTouchesEnded(_ touches: Set<UITouch>, with event: UIEvent?, in view: UIView) {
+            print("🎵 handleTouchesEnded called with \(touches.count) touches")
+            
+            guard let metalSynth = metalSynth else { 
+                print("❌ MetalSynth is nil in handleTouchesEnded")
+                return 
+            }
+            
+            for touch in touches {
+                if let note = activeTouches[touch] {
+                    metalSynth.noteOff(noteNumber: note)
+                    activeTouches.removeValue(forKey: touch)
+                    print("🎹 Touch ended: Note \(note) OFF, \(activeTouches.count) touches remaining")
+                } else {
+                    print("⚠️ Touch ended but no note found for this touch")
+                }
+            }
+            
+            // All touches ended - polyphonic voices handle their own wavetable positions
+            if activeTouches.isEmpty {
+                print("🔇 All touches ended - forcing all notes off")
+                metalSynth.allNotesOff() // Force clear all voices to prevent stuck notes
+            }
+        }
+        
+        @objc private func handleScaleChange(_ gesture: UITapGestureRecognizer) {
+            // Cycle through celestial scales on double-tap
+            currentScaleIndex = (currentScaleIndex + 1) % celestialScales.count
+            
+            let scaleNames = ["Pentatonic Major", "Pentatonic Minor", "Natural Minor", "Lydian", "Harmonic Minor", "Mixolydian", "Whole Tone"]
+            print("🎼 Switched to celestial scale: \(scaleNames[currentScaleIndex])")
+        }
+        
+        
+        @objc private func handleDragRotation(_ gesture: UIPanGestureRecognizer) {
+            guard let view = gesture.view else { return }
+            
+            switch gesture.state {
+            case .began:
+                print("Drag rotation began")
+            case .changed:
+                let translation = gesture.translation(in: view)
+                // Convert horizontal drag to Y rotation, vertical drag to X rotation
+                let rotationYDelta = -Float(translation.x) / Float(view.bounds.width) * 3.14  // Half circle per screen width (inverted)
+                let rotationXDelta = -Float(translation.y) / Float(view.bounds.height) * 3.14  // Half circle per screen height (inverted)
+                
+                currentRotationY += rotationYDelta
+                currentRotationX += rotationXDelta
+                
+                // Limit rotation to 45 degrees (π/4 radians) on each axis
+                let maxRotation: Float = .pi / 4  // 45 degrees in radians
+                currentRotationY = max(-maxRotation, min(maxRotation, currentRotationY))
+                currentRotationX = max(-maxRotation, min(maxRotation, currentRotationX))
+                
+                gesture.setTranslation(.zero, in: view) // Reset translation
+                particleSystem?.setRotation(currentRotationX, currentRotationY)
+                print("Rotation updated to X: \(currentRotationX), Y: \(currentRotationY)")
+            case .ended:
+                print("Drag rotation ended")
+            default:
+                break
+            }
+        }
+        
+        deinit {
+            displayTimer?.invalidate()
+        }
+        
+        private func setupMetal() {
+            device = MTLCreateSystemDefaultDevice()
+            commandQueue = device?.makeCommandQueue()
+            
+            // Metal setup complete
+            
+            // Initialize particle system
+            if let device = device {
+                particleSystem = ParticleDissolveSystem(device: device)
+                // Set initial transformations to make it obvious that gestures work
+                particleSystem?.setScale(currentZoomScale)
+                particleSystem?.setRotation(currentRotationX, currentRotationY)
+                // Particle system initialized
+            }
+            
+            let library = device?.makeDefaultLibrary()
+            let vertexFunction = library?.makeFunction(name: "vertex_main")
+            let fragmentFunction = library?.makeFunction(name: "fragment_main")
+            
+            // Shader functions loaded
+            
+            let pipelineDescriptor = MTLRenderPipelineDescriptor()
+            pipelineDescriptor.vertexFunction = vertexFunction
+            pipelineDescriptor.fragmentFunction = fragmentFunction
+            pipelineDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+            pipelineDescriptor.depthAttachmentPixelFormat = .depth32Float // Match MTKView depth format
+            
+            // Enable alpha blending for transparency
+            pipelineDescriptor.colorAttachments[0].isBlendingEnabled = true
+            pipelineDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+            pipelineDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            pipelineDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+            pipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            
+            do {
+                pipelineState = try device?.makeRenderPipelineState(descriptor: pipelineDescriptor)
+                // Pipeline state created
+            } catch {
+                // Error creating pipeline state
+            }
+        }
+        
+        func loadImage(from urlString: String) {
+            // Fix URL if it's missing protocol
+            var fixedUrlString = urlString
+            if !urlString.hasPrefix("http://") && !urlString.hasPrefix("https://") {
+                fixedUrlString = "https://" + urlString
+            }
+            
+            guard let url = URL(string: fixedUrlString) else { 
+                print("Invalid image URL: \(urlString) -> \(fixedUrlString)")
+                return 
+            }
+            
+            print("Loading fullscreen image from: \(urlString) -> \(fixedUrlString)")
+            
+            // Load main image
+            loadImageTexture(from: url, isMain: true)
+            
+            // Generate and load mask URL
+            let maskUrl = generateMaskUrl(from: fixedUrlString)
+            if let maskUrl = maskUrl {
+                loadImageTexture(from: maskUrl, isMain: false)
+            }
+        }
+        
+        private func generateMaskUrl(from urlString: String) -> URL? {
+            guard let url = URL(string: urlString) else { return nil }
+            
+            let pathExtension = url.pathExtension
+            let pathWithoutExtension = url.deletingPathExtension().absoluteString
+            let maskUrlString = "\(pathWithoutExtension)_mask.\(pathExtension)"
+            
+            return URL(string: maskUrlString)
+        }
+        
+        private func loadImageTexture(from url: URL, isMain: Bool) {
+            // Starting image download
+            
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 30
+            
+            URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+                if let error = error {
+                    print("DOWNLOAD ERROR for \(isMain ? "main" : "mask"): \(error)")
+                    return
+                }
+                
+                if let httpResponse = response as? HTTPURLResponse {
+                    print("HTTP STATUS for \(isMain ? "main" : "mask"): \(httpResponse.statusCode)")
+                }
+                
+                guard let data = data else { 
+                    print("NO DATA received for \(isMain ? "main" : "mask")")
+                    return 
+                }
+                
+                print("DATA RECEIVED for \(isMain ? "main" : "mask"): \(data.count) bytes")
+                
+                guard let image = UIImage(data: data) else { 
+                    print("FAILED to create UIImage for \(isMain ? "main" : "mask")")
+                    return 
+                }
+                
+                print("UIImage created successfully for \(isMain ? "main" : "mask"): \(image.size)")
+                
+                guard let cgImage = image.cgImage else { 
+                    print("FAILED to get CGImage for \(isMain ? "main" : "mask")")
+                    return 
+                }
+                
+                print("CGImage created successfully for \(isMain ? "main" : "mask"): \(cgImage.width)x\(cgImage.height)")
+                
+                DispatchQueue.main.async {
+                    print("DispatchQueue.main.async called for \(isMain ? "main" : "mask")")
+                    guard let self = self else {
+                        print("self is nil in DispatchQueue for \(isMain ? "main" : "mask")")
+                        return
+                    }
+                    
+                    print("About to call create texture function for \(isMain ? "main" : "mask")")
+                    if isMain {
+                        self.createTexture(from: cgImage)
+                    } else {
+                        self.createMaskTexture(from: cgImage)
+                    }
+                }
+            }.resume()
+        }
+        
+        private func createTexture(from cgImage: CGImage) {
+            guard let device = device else { 
+                // No device for texture creation
+                return 
+            }
+            
+            // Creating texture
+            
+            let textureLoader = MTKTextureLoader(device: device)
+            do {
+                let newTexture = try textureLoader.newTexture(cgImage: cgImage, options: nil)
+                texture = newTexture
+                // Texture created successfully
+                
+                // Start particle dissolve with the new image
+                if let particleSystem = particleSystem {
+                    particleSystem.setPhoto(newTexture, depth: maskTexture)
+                    // Started particle dissolve
+                    
+                    // Start update timer for particle system
+                    startUpdateTimer()
+                }
+                
+                DispatchQueue.main.async { [weak self] in
+                    // Triggering view redraw
+                    if let mtkView = self?.mtkView {
+                        mtkView.setNeedsDisplay()
+                    }
+                }
+            } catch {
+                // Error creating texture
+            }
+        }
+        
+        private func createMaskTexture(from cgImage: CGImage) {
+            print("createMaskTexture called with image: \(cgImage.width)x\(cgImage.height)")
+            
+            guard let device = device else { 
+                print("No Metal device available for mask")
+                return 
+            }
+            
+            // ANALYZE CGImage data BEFORE creating Metal texture
+            let width = cgImage.width
+            let height = cgImage.height
+            let bytesPerPixel = 4
+            let bytesPerRow = width * bytesPerPixel
+            let bitsPerComponent = 8
+            
+            var pixelData = [UInt8](repeating: 0, count: height * bytesPerRow)
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            let context = CGContext(data: &pixelData,
+                                  width: width,
+                                  height: height,
+                                  bitsPerComponent: bitsPerComponent,
+                                  bytesPerRow: bytesPerRow,
+                                  space: colorSpace,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            
+            context?.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            
+            // Analyze pixel values to find max/min
+            var minVal: UInt8 = 255
+            var maxVal: UInt8 = 0
+            var whitePixelCount = 0
+            var totalPixels = 0
+            
+            for i in stride(from: 0, to: pixelData.count, by: 4) {
+                let r = pixelData[i]
+                let g = pixelData[i + 1] 
+                let b = pixelData[i + 2]
+                let gray = (UInt16(r) + UInt16(g) + UInt16(b)) / 3
+                let grayByte = UInt8(gray)
+                
+                minVal = min(minVal, grayByte)
+                maxVal = max(maxVal, grayByte)
+                
+                if grayByte > 250 { whitePixelCount += 1 }
+                totalPixels += 1
+            }
+            
+            print("MASK ANALYSIS - Min: \(minVal), Max: \(maxVal), White pixels (>250): \(whitePixelCount)/\(totalPixels)")
+            
+            let textureLoader = MTKTextureLoader(device: device)
+            do {
+                // Force linear colorspace to prevent gamma correction
+                let options: [MTKTextureLoader.Option: Any] = [
+                    .SRGB: false  // Disable sRGB conversion
+                ]
+                let newMaskTexture = try textureLoader.newTexture(cgImage: cgImage, options: options)
+                maskTexture = newMaskTexture
+                print("Mask texture created successfully: \(newMaskTexture.width)x\(newMaskTexture.height)")
+                
+                DispatchQueue.main.async { [weak self] in
+                    if let mtkView = self?.mtkView {
+                        mtkView.setNeedsDisplay()
+                    }
+                }
+            } catch {
+                print("Error creating mask texture: \(error)")
+            }
+        }
+        
+        private func loadHardcodedImage() {
+            print("LOADING HARDCODED IMAGES...")
+            
+            // Use the URLs from your log
+            let imageUrl = "https://cdn.kilo.gallery/items/z9vz714m/klhlj.png"
+            let maskUrl = "https://cdn.kilo.gallery/items/z9vz714m/klhlj_mask.png"
+            
+            print("Loading main image: \(imageUrl)")
+            print("Loading mask image: \(maskUrl)")
+            
+            loadImageTexture(from: URL(string: imageUrl)!, isMain: true)
+            loadImageTexture(from: URL(string: maskUrl)!, isMain: false)
+        }
+        
+        private func startUpdateTimer() {
+            displayTimer?.invalidate()
+            displayTimer = Timer.scheduledTimer(withTimeInterval: 1.0/60.0, repeats: true) { [weak self] _ in
+                self?.particleSystem?.update()
+                DispatchQueue.main.async {
+                    self?.mtkView?.setNeedsDisplay()
+                }
+            }
+        }
+        
+        func setDepthAmount(_ amount: Float) {
+            particleSystem?.setDepthAmount(amount)
+        }
+        
+        func setGlobalSize(_ size: Float) {
+            particleSystem?.setGlobalSize(size)
+        }
+        
+        func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+        
+        func draw(in view: MTKView) {
+            guard let drawable = view.currentDrawable,
+                  let commandQueue = commandQueue else { 
+                return 
+            }
+            
+            guard let commandBuffer = commandQueue.makeCommandBuffer(),
+                  let renderPassDescriptor = view.currentRenderPassDescriptor else { return }
+            
+            // Clear background
+            renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0) // Transparent background
+            renderPassDescriptor.colorAttachments[0].loadAction = .clear
+            
+            guard let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor) else { return }
+            
+            // Skip rendering background image since we want the Mapbox map to show through
+            // Only render particles with transparent background
+            
+            // Render particles on top (if active)
+            if let particleSystem = particleSystem, let _ = texture {
+                // Rendering particle system
+                
+                // Create perspective projection matrix for much larger particles
+                let viewSize = view.bounds.size
+                let aspect = Float(viewSize.width) / Float(viewSize.height)
+                
+                // Perspective projection parameters
+                let fovY: Float = 60.0 * Float.pi / 180.0  // 60 degree field of view
+                let near: Float = 0.1   // Very close near plane
+                let far: Float = 100.0  // Far plane
+                
+                // Calculate perspective projection matrix
+                let f = 1.0 / tan(fovY / 2.0)
+                let sx = f / aspect
+                let sy = f
+                let sz = (far + near) / (near - far)
+                let tz = (2.0 * far * near) / (near - far)
+                
+                let mvpMatrix = float4x4([
+                    SIMD4<Float>(sx, 0, 0, 0),
+                    SIMD4<Float>(0, sy, 0, 0),
+                    SIMD4<Float>(0, 0, sz, -1),  // Perspective divide
+                    SIMD4<Float>(0, 0, tz, 0)
+                ])
+                
+                particleSystem.render(to: renderEncoder, mvpMatrix: mvpMatrix)
+            }
+            
+            renderEncoder.endEncoding()
+            commandBuffer.present(drawable)
+            commandBuffer.commit()
+        }
+    }
+}
+
+struct ChatMessage: Identifiable {
+    let id = UUID()
+    let role: String
+    let content: String
+}
+
+struct ChatBubble: View {
+    let message: ChatMessage
+    
+    var body: some View {
+        HStack {
+            if message.role == "user" {
+                Spacer()
+            }
+            
+            Text(message.content)
+                .padding()
+                .background(Color.black.opacity(0.4))
+                .foregroundColor(.white)
+                .cornerRadius(12)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                )
+            
+            if message.role == "assistant" {
+                Spacer()
+            }
+        }
+        .padding(.horizontal)
+    }
+}
+
+struct MetalImageView: UIViewRepresentable {
+    let imageUrl: String
+    
+    func makeUIView(context: Context) -> MTKView {
+        let mtkView = MTKView()
+        mtkView.device = MTLCreateSystemDefaultDevice()
+        mtkView.delegate = context.coordinator
+        mtkView.enableSetNeedsDisplay = true
+        mtkView.isPaused = true
+        context.coordinator.setMTKView(mtkView)
+        return mtkView
+    }
+    
+    func updateUIView(_ uiView: MTKView, context: Context) {
+        context.coordinator.loadImage(from: imageUrl)
+    }
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+    
+    class Coordinator: NSObject, MTKViewDelegate {
+        private var device: MTLDevice?
+        private var commandQueue: MTLCommandQueue?
+        private var pipelineState: MTLRenderPipelineState?
+        private var texture: MTLTexture?
+        private var maskTexture: MTLTexture?
+        private weak var mtkView: MTKView?
+        
+        override init() {
+            super.init()
+            setupMetal()
+        }
+        
+        func setMTKView(_ view: MTKView) {
+            mtkView = view
+        }
+        
+        private func setupMetal() {
+            device = MTLCreateSystemDefaultDevice()
+            commandQueue = device?.makeCommandQueue()
+            
+            let library = device?.makeDefaultLibrary()
+            let vertexFunction = library?.makeFunction(name: "vertex_main")
+            let fragmentFunction = library?.makeFunction(name: "fragment_main")
+            
+            let pipelineDescriptor = MTLRenderPipelineDescriptor()
+            pipelineDescriptor.vertexFunction = vertexFunction
+            pipelineDescriptor.fragmentFunction = fragmentFunction
+            pipelineDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+            
+            // Enable alpha blending for transparency
+            pipelineDescriptor.colorAttachments[0].isBlendingEnabled = true
+            pipelineDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+            pipelineDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            pipelineDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+            pipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            
+            do {
+                pipelineState = try device?.makeRenderPipelineState(descriptor: pipelineDescriptor)
+            } catch {
+                print("Error creating pipeline state: \(error)")
+            }
+        }
+        
+        func loadImage(from urlString: String) {
+            // Fix URL if it's missing protocol
+            var fixedUrlString = urlString
+            if !urlString.hasPrefix("http://") && !urlString.hasPrefix("https://") {
+                fixedUrlString = "https://" + urlString
+            }
+            
+            guard let url = URL(string: fixedUrlString) else { 
+                print("Invalid image URL: \(urlString) -> \(fixedUrlString)")
+                return 
+            }
+            
+            print("Loading image from: \(urlString) -> \(fixedUrlString)")
+            
+            // Load main image
+            loadImageTexture(from: url, isMain: true)
+            
+            // Generate and load mask URL
+            let maskUrl = generateMaskUrl(from: fixedUrlString)
+            if let maskUrl = maskUrl {
+                loadImageTexture(from: maskUrl, isMain: false)
+            }
+        }
+        
+        private func generateMaskUrl(from urlString: String) -> URL? {
+            guard let url = URL(string: urlString) else { return nil }
+            
+            let pathExtension = url.pathExtension
+            let pathWithoutExtension = url.deletingPathExtension().absoluteString
+            let maskUrlString = "\(pathWithoutExtension)_mask.\(pathExtension)"
+            
+            print("Generated mask URL: \(maskUrlString)")
+            return URL(string: maskUrlString)
+        }
+        
+        private func loadImageTexture(from url: URL, isMain: Bool) {
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 30
+            
+            URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+                if let error = error {
+                    print("\(isMain ? "Image" : "Mask") download error: \(error)")
+                    return
+                }
+                
+                guard let data = data else {
+                    print("No \(isMain ? "image" : "mask") data received")
+                    return
+                }
+                
+                guard let image = UIImage(data: data) else {
+                    print("Failed to create UIImage from \(isMain ? "image" : "mask") data")
+                    return
+                }
+                
+                guard let cgImage = image.cgImage else {
+                    print("Failed to get CGImage from \(isMain ? "image" : "mask") UIImage")
+                    return
+                }
+                
+                print("\(isMain ? "Image" : "Mask") loaded successfully, creating texture")
+                DispatchQueue.main.async {
+                    if isMain {
+                        self?.createTexture(from: cgImage)
+                    } else {
+                        self?.createMaskTexture(from: cgImage)
+                    }
+                }
+            }.resume()
+        }
+        
+        private func createTexture(from cgImage: CGImage) {
+            guard let device = device else { 
+                print("No Metal device available")
+                return 
+            }
+            
+            let textureLoader = MTKTextureLoader(device: device)
+            do {
+                let newTexture = try textureLoader.newTexture(cgImage: cgImage, options: nil)
+                texture = newTexture
+                print("Main texture created successfully: \(newTexture.width)x\(newTexture.height)")
+                
+                // Force the view to redraw with the new texture
+                DispatchQueue.main.async { [weak self] in
+                    if let mtkView = self?.mtkView {
+                        mtkView.setNeedsDisplay()
+                    }
+                }
+            } catch {
+                print("Error creating main texture: \(error)")
+            }
+        }
+        
+        private func createMaskTexture(from cgImage: CGImage) {
+            print("createMaskTexture called with image: \(cgImage.width)x\(cgImage.height)")
+            
+            guard let device = device else { 
+                print("No Metal device available for mask")
+                return 
+            }
+            
+            // ANALYZE CGImage data BEFORE creating Metal texture
+            let width = cgImage.width
+            let height = cgImage.height
+            let bytesPerPixel = 4
+            let bytesPerRow = width * bytesPerPixel
+            let bitsPerComponent = 8
+            
+            var pixelData = [UInt8](repeating: 0, count: height * bytesPerRow)
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            let context = CGContext(data: &pixelData,
+                                  width: width,
+                                  height: height,
+                                  bitsPerComponent: bitsPerComponent,
+                                  bytesPerRow: bytesPerRow,
+                                  space: colorSpace,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            
+            context?.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            
+            // Analyze pixel values to find max/min
+            var minVal: UInt8 = 255
+            var maxVal: UInt8 = 0
+            var whitePixelCount = 0
+            var totalPixels = 0
+            
+            for i in stride(from: 0, to: pixelData.count, by: 4) {
+                let r = pixelData[i]
+                let g = pixelData[i + 1] 
+                let b = pixelData[i + 2]
+                let gray = (UInt16(r) + UInt16(g) + UInt16(b)) / 3
+                let grayByte = UInt8(gray)
+                
+                minVal = min(minVal, grayByte)
+                maxVal = max(maxVal, grayByte)
+                
+                if grayByte > 250 { whitePixelCount += 1 }
+                totalPixels += 1
+            }
+            
+            print("MASK ANALYSIS - Min: \(minVal), Max: \(maxVal), White pixels (>250): \(whitePixelCount)/\(totalPixels)")
+            
+            let textureLoader = MTKTextureLoader(device: device)
+            do {
+                // Force linear colorspace to prevent gamma correction
+                let options: [MTKTextureLoader.Option: Any] = [
+                    .SRGB: false  // Disable sRGB conversion
+                ]
+                let newMaskTexture = try textureLoader.newTexture(cgImage: cgImage, options: options)
+                maskTexture = newMaskTexture
+                print("Mask texture created successfully: \(newMaskTexture.width)x\(newMaskTexture.height)")
+                
+                // Force the view to redraw with the new mask texture
+                DispatchQueue.main.async { [weak self] in
+                    if let mtkView = self?.mtkView {
+                        mtkView.setNeedsDisplay()
+                    }
+                }
+            } catch {
+                print("Error creating mask texture: \(error)")
+            }
+        }
+        
+        func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+        
+        func draw(in view: MTKView) {
+            guard let drawable = view.currentDrawable,
+                  let pipelineState = pipelineState,
+                  let commandQueue = commandQueue else { return }
+            
+            let commandBuffer = commandQueue.makeCommandBuffer()
+            let renderEncoder = commandBuffer?.makeRenderCommandEncoder(descriptor: view.currentRenderPassDescriptor!)
+            
+            renderEncoder?.setRenderPipelineState(pipelineState)
+            
+            // Set main texture at index 0
+            if let texture = texture {
+                renderEncoder?.setFragmentTexture(texture, index: 0)
+            }
+            
+            // Set mask texture at index 1
+            if let maskTexture = maskTexture {
+                renderEncoder?.setFragmentTexture(maskTexture, index: 1)
+            }
+            
+            renderEncoder?.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            renderEncoder?.endEncoding()
+            
+            commandBuffer?.present(drawable)
+            commandBuffer?.commit()
+        }
+    }
+}
+
+
+// MARK: - Location Manager
+class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
+    private let locationManager = CLLocationManager()
+    @Published var currentLocation: CLLocation?
+    @Published var authorizationStatus: CLAuthorizationStatus = .notDetermined
+    @Published var isTracking: Bool = false
+    
+    // Callback for continuous location updates
+    var onLocationUpdate: ((CLLocationCoordinate2D) -> Void)?
+    
+    // Callback for initial location (used to center map)
+    var onInitialLocationReceived: ((CLLocationCoordinate2D) -> Void)?
+    private var hasReceivedInitialLocation = false
+    
+    override init() {
+        super.init()
+        locationManager.delegate = self
+        
+        // Optimize for walking/running with battery efficiency
+        locationManager.desiredAccuracy = kCLLocationAccuracyBestForNavigation // Best for continuous tracking
+        locationManager.distanceFilter = 2.0 // 2 meters - good balance for walking/running
+        locationManager.activityType = .fitness // Optimized for walking/running
+        locationManager.pausesLocationUpdatesAutomatically = true // Auto-pause when not moving
+        
+        // Always start tracking immediately for fitness apps
+        requestLocationPermission()
+        startAlwaysOnTracking()
+    }
+    
+    func requestLocationPermission() {
+        switch locationManager.authorizationStatus {
+        case .notDetermined:
+            locationManager.requestWhenInUseAuthorization()
+        case .denied, .restricted:
+            print("[location] Location access denied")
+        case .authorizedWhenInUse, .authorizedAlways:
+            locationManager.requestLocation()
+        @unknown default:
+            break
+        }
+    }
+    
+    func requestLocation() {
+        guard locationManager.authorizationStatus == .authorizedWhenInUse || locationManager.authorizationStatus == .authorizedAlways else {
+            print("[location] Location not authorized")
+            return
+        }
+        locationManager.requestLocation()
+    }
+    
+    // Start continuous high-accuracy tracking
+    func startContinuousTracking() {
+        guard locationManager.authorizationStatus == .authorizedWhenInUse || locationManager.authorizationStatus == .authorizedAlways else {
+            print("[location] Location not authorized for continuous tracking")
+            return
+        }
+        
+        isTracking = true
+        locationManager.startUpdatingLocation()
+        print("[location] 🎯 Started continuous tracking (best accuracy, 0.5m filter)")
+    }
+    
+    // Stop continuous tracking
+    func stopContinuousTracking() {
+        isTracking = false
+        locationManager.stopUpdatingLocation()
+        print("[location] 🛑 Stopped continuous tracking")
+    }
+    
+    // Always-on efficient tracking for walking/running
+    func startAlwaysOnTracking() {
+        guard locationManager.authorizationStatus == .authorizedWhenInUse || locationManager.authorizationStatus == .authorizedAlways else {
+            print("[location] 📱 Waiting for location authorization for always-on tracking")
+            return
+        }
+        
+        isTracking = true
+        locationManager.startUpdatingLocation()
+        print("[location] 🏃 Started always-on fitness tracking (2m filter, auto-pause enabled)")
+    }
+    
+    // MARK: - CLLocationManagerDelegate
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard let location = locations.last else { return }
+        
+        // Filter out old or inaccurate locations
+        let age = abs(location.timestamp.timeIntervalSinceNow)
+        if age > 5.0 { // Ignore locations older than 5 seconds
+            print("[location] ⚠️ Ignoring old location (age: \(age)s)")
+            return
+        }
+        
+        if location.horizontalAccuracy > 20.0 { // More permissive accuracy threshold
+            print("[location] ⚠️ Ignoring inaccurate location (accuracy: \(location.horizontalAccuracy)m)")
+            return
+        }
+        
+        currentLocation = location
+        
+        // Track that we've received initial location (for reference)
+        if !hasReceivedInitialLocation {
+            hasReceivedInitialLocation = true
+            print("[location] 🎯 First location received: \(location.coordinate)")
+        }
+        
+        if isTracking {
+            print("[location] 📍 High-accuracy update: \(location.coordinate), accuracy: \(String(format: "%.1f", location.horizontalAccuracy))m")
+            onLocationUpdate?(location.coordinate)
+        } else {
+            print("[location] 📍 Location updated: \(location.coordinate)")
+        }
+    }
+    
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        print("[location] Location error: \(error)")
+    }
+    
+    func locationManager(_ manager: CLLocationManager, didChangeAuthorization status: CLAuthorizationStatus) {
+        authorizationStatus = status
+        print("[location] Authorization status changed: \(status)")
+        
+        if status == .authorizedWhenInUse || status == .authorizedAlways {
+            // Start always-on tracking when permission is granted
+            startAlwaysOnTracking()
+        }
+    }
+}
+
+// MARK: - Neon Grid MapView
+struct NeonGridMapView: UIViewRepresentable {
+    @Binding var viewport: Viewport
+    let allowViewportUpdate: Bool
+    let userPath: [CLLocationCoordinate2D]
+    let onCameraChanged: (CameraState) -> Void
+    let onMapLoaded: () -> Void
+    let metalSynth: MetalWavetableSynth?
+    let onSkyTouchCountChanged: (Int) -> Void
+    
+    func makeUIView(context: Context) -> MapView {
+        let mapView = MapView(frame: .zero)
+        
+        // Load dark style first
+        mapView.mapboxMap.loadStyle(.dark) { error in
+            if let error = error {
+                print("[map] ❌ Failed to load dark style: \(error)")
+            } else {
+                print("[map] 🌑 Dark style loaded successfully")
+                DispatchQueue.main.async {
+                    mapView.applyNeonGridStyle()
+                }
+            }
+        }
+        
+        // Configure gesture options
+        mapView.gestures.options.panEnabled = true // Ensure pan is enabled for map movement
+        mapView.gestures.options.pinchEnabled = true // Ensure pinch is enabled for zoom
+        mapView.gestures.options.doubleTapToZoomInEnabled = false
+        mapView.gestures.options.doubleTouchToZoomOutEnabled = false
+        mapView.gestures.options.quickZoomEnabled = false
+        mapView.gestures.options.pitchEnabled = true // Allow programmatic pitch changes
+        
+        print("[map] 🎮 Gesture options: pan=\(mapView.gestures.options.panEnabled), pinch=\(mapView.gestures.options.pinchEnabled), pitch=\(mapView.gestures.options.pitchEnabled)")
+        
+        
+        // Set up style loaded callback
+        context.coordinator.styleObserver = mapView.mapboxMap.onStyleLoaded.observe { [weak mapView] _ in
+            print("[map] 🎨 Style loaded callback triggered")
+            mapView?.applyNeonGridStyle()
+            onMapLoaded()
+            
+            // Set up SkyGateRecognizer
+            DispatchQueue.main.async {
+                context.coordinator.setupSkyGateRecognizer(mapView: mapView, metalSynth: metalSynth, onSkyTouchCountChanged: onSkyTouchCountChanged)
+            }
+            
+            // Set up camera observer for debug panel updates only (no viewport changes)
+            context.coordinator.cameraObserver = mapView?.mapboxMap.onCameraChanged.observe { [weak mapView] _ in
+                guard let mapView = mapView else { return }
+                let cameraState = mapView.mapboxMap.cameraState
+                
+                print("[map] 📷 Camera changed: zoom=\(String(format: "%.2f", cameraState.zoom)), pitch=\(String(format: "%.1f", cameraState.pitch))°")
+                
+                DispatchQueue.main.async {
+                    self.onCameraChanged(cameraState)
+                }
+            }
+            
+            print("[map] 📷 Map setup complete with camera observer for debug updates")
+        }
+        
+        context.coordinator.mapView = mapView
+        
+        // Also test camera state right after mapView creation
+        print("[map] 📸 MapView created - camera: zoom=\(String(format: "%.2f", mapView.mapboxMap.cameraState.zoom)), pitch=\(String(format: "%.1f", mapView.mapboxMap.cameraState.pitch))°")
+        
+        return mapView
+    }
+    
+    func updateUIView(_ uiView: MapView, context: Context) {
+        // Update viewport when SwiftUI state changes
+        context.coordinator.updateViewport(viewport, allowUpdate: allowViewportUpdate)
+        context.coordinator.updateUserPath(userPath)
+    }
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+    
+    class Coordinator {
+        weak var mapView: MapView?
+        var styleObserver: Cancelable?
+        var cameraObserver: Cancelable?
+        
+        func updateViewport(_ viewport: Viewport, allowUpdate: Bool) {
+            guard let mapView = mapView else { return }
+            
+            // Only apply viewport changes when explicitly allowed (e.g. location button)
+            if !allowUpdate {
+                print("[map] 🚫 updateViewport blocked to prevent snap-back")
+                return
+            }
+            
+            // Extract camera options from viewport and apply them
+            let cameraOptions = viewport.camera
+            if let options = cameraOptions {
+                mapView.mapboxMap.setCamera(to: options)
+                print("[map] 📷 Applied camera: center=\(options.center?.latitude ?? 0), zoom=\(options.zoom ?? 0), pitch=\(options.pitch ?? 0)")
+            }
+        }
+        
+        func updateUserPath(_ path: [CLLocationCoordinate2D]) {
+            guard let mapView = mapView, path.count >= 2 else { return }
+            
+            // Remove existing path
+            try? mapView.mapboxMap.removeLayer(withId: "user-path")
+            try? mapView.mapboxMap.removeSource(withId: "user-path-source")
+            
+            // Add new path
+            let lineString = LineString(path)
+            var source = GeoJSONSource(id: "user-path-source")
+            source.data = .geometry(Geometry.lineString(lineString))
+            
+            var pathLayer = LineLayer(id: "user-path", source: "user-path-source")
+            pathLayer.lineColor = .constant(StyleColor(.systemGreen))
+            pathLayer.lineWidth = .constant(4.0)
+            pathLayer.lineOpacity = .constant(0.8)
+            
+            try? mapView.mapboxMap.addSource(source)
+            try? mapView.mapboxMap.addLayer(pathLayer)
+        }
+        
+        func setupSkyGateRecognizer(mapView: MapView?, metalSynth: MetalWavetableSynth?, onSkyTouchCountChanged: @escaping (Int) -> Void) {
+            guard let mapView = mapView else { 
+                print("[map] ❌ No mapView for SkyGateRecognizer")
+                return 
+            }
+            
+            print("[map] 🚪 Setting up SkyGateRecognizer with metalSynth: \(metalSynth != nil ? "✅" : "❌")")
+            
+            let gate = SkyGateRecognizer(mapLoaded: mapView as AnyObject, metalSynth: metalSynth, onSkyTouchCountChanged: onSkyTouchCountChanged)
+            
+            // Configure Mapbox gesture recognizers to require SkyGate to fail BEFORE adding SkyGate
+            let recognizers = mapView.gestureRecognizers ?? []
+            print("[map] 🔍 Found \(recognizers.count) existing gesture recognizers")
+            
+            var configuredCount = 0
+            for recognizer in recognizers {
+                let name = String(describing: type(of: recognizer))
+                print("[map] 🔍 Gesture recognizer: \(name)")
+                // Configure ALL Mapbox gestures to wait for SkyGate
+                recognizer.require(toFail: gate)
+                configuredCount += 1
+                print("[map] ✅ Configured \(name) to wait for SkyGate")
+            }
+            
+            // NOW add the SkyGate recognizer
+            mapView.addGestureRecognizer(gate)
+            print("[map] 🚪 Added SkyGateRecognizer to mapView")
+            
+            print("[map] 🎉 SkyGateRecognizer setup complete! Configured \(configuredCount) gestures to wait for SkyGate")
+        }
+        
+        func adjustPitchIfNeeded(mapView: MapView, currentZoom: CGFloat) {
+            // Temporarily disabled to prevent camera snapping
+            print("[map] 🔧 adjustPitchIfNeeded disabled to prevent camera snapping")
+        }
+        
+    }
+}
+
+// MARK: - User Modal View
+struct UserModalView: View {
+    @Environment(\.dismiss) private var dismiss
+    
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 20) {
+                Text("User Settings")
+                    .font(.largeTitle)
+                    .fontWeight(.bold)
+                
+                VStack(spacing: 16) {
+                    Button("Reset Walking Path") {
+                        // TODO: Reset path functionality
+                        print("[user] Reset walking path tapped")
+                    }
+                    .foregroundColor(.white)
+                    .padding()
+                    .background(Color.red)
+                    .cornerRadius(8)
+                    
+                    Button("Export Path Data") {
+                        // TODO: Export functionality
+                        print("[user] Export path data tapped")
+                    }
+                    .foregroundColor(.white)
+                    .padding()
+                    .background(Color.blue)
+                    .cornerRadius(8)
+                    
+                    Button("Settings") {
+                        // TODO: Settings functionality
+                        print("[user] Settings tapped")
+                    }
+                    .foregroundColor(.white)
+                    .padding()
+                    .background(Color.gray)
+                    .cornerRadius(8)
+                }
+                
+                Spacer()
+            }
+            .padding()
+            .navigationTitle("User")
+            .navigationBarTitleDisplayMode(.inline)
+            .navigationBarItems(trailing: Button("Done") {
+                dismiss()
+            })
+        }
+    }
+}
+
+extension MapView {
+    func applyNeonGridStyle() {
+        print("[map] 🎨 Starting neon grid style application...")
+        
+        // 1) Background tint (deep purple/near-black)
+        var bg = BackgroundLayer(id: "neon-bg")
+        bg.backgroundColor = .constant(StyleColor(UIColor(red: 0.02, green: 0.01, blue: 0.05, alpha: 1)))
+        do {
+            try self.mapboxMap.addLayer(bg, layerPosition: .at(0))
+            print("[map] ✅ Added dark background layer")
+        } catch {
+            print("[map] ❌ Failed to add background: \(error)")
+        }
+        
+        // 2) Streets source (Mapbox Streets v8)
+        var streets = VectorSource(id: "neon-streets")
+        streets.url = "mapbox://mapbox.mapbox-streets-v8"
+        do {
+            try self.mapboxMap.addSource(streets)
+            print("[map] ✅ Added streets source")
+        } catch {
+            print("[map] ❌ Failed to add streets source: \(error)")
+        }
+        
+        // Road filter for drivable roads
+        let roadFilter: Exp = Exp(.any) {
+            Exp(.eq) { Exp(.get) { "class" }; "motorway" }
+            Exp(.eq) { Exp(.get) { "class" }; "motorway_link" }
+            Exp(.eq) { Exp(.get) { "class" }; "trunk" }
+            Exp(.eq) { Exp(.get) { "class" }; "trunk_link" }
+            Exp(.eq) { Exp(.get) { "class" }; "primary" }
+            Exp(.eq) { Exp(.get) { "class" }; "primary_link" }
+            Exp(.eq) { Exp(.get) { "class" }; "secondary" }
+            Exp(.eq) { Exp(.get) { "class" }; "secondary_link" }
+            Exp(.eq) { Exp(.get) { "class" }; "tertiary" }
+            Exp(.eq) { Exp(.get) { "class" }; "tertiary_link" }
+            Exp(.eq) { Exp(.get) { "class" }; "street" }
+            Exp(.eq) { Exp(.get) { "class" }; "street_limited" }
+            Exp(.eq) { Exp(.get) { "class" }; "service" }
+        }
+        
+        // White neon colors
+        let neonCore = StyleColor(UIColor(red: 1.0, green: 1.0, blue: 1.0, alpha: 1))   // pure white
+        let neonGlow = StyleColor(UIColor(red: 0.9, green: 0.9, blue: 1.0, alpha: 1))   // slightly blue-white glow
+        
+        // Zoom-driven width expressions - thinner roads
+        let wideByZoom: Exp = Exp(.interpolate) {
+            Exp(.exponential, 1.2)
+            Exp(.zoom)
+            5;  0.5
+            10; 2.0
+            13; 4.0
+            16; 8.0
+            18; 12.0
+        }
+        let thinByZoom: Exp = Exp(.interpolate) {
+            Exp(.exponential, 1.2)
+            Exp(.zoom)
+            5;  0.2
+            10; 0.8
+            13; 2.0
+            16; 4.0
+            18; 6.0
+        }
+        
+        // 3) GLOW layer (fat, blurred, low opacity)
+        var glow = LineLayer(id: "neon-glow", source: "neon-streets")
+        glow.sourceLayer = "road"
+        glow.filter = roadFilter
+        glow.lineColor = .constant(neonGlow)
+        glow.lineOpacity = .constant(0.5)
+        glow.lineWidth = .expression(wideByZoom)
+        glow.lineBlur = .expression(Exp(.interpolate) {
+            Exp(.linear); Exp(.zoom)
+            5;  1.0
+            12; 3.0
+            16; 8.0
+            18; 15.0
+        })
+        glow.lineCap = .constant(.round)
+        glow.lineJoin = .constant(.round)
+        do {
+            try self.mapboxMap.addLayer(glow)
+            print("[map] ✅ Added neon glow layer")
+        } catch {
+            print("[map] ❌ Failed to add glow layer: \(error)")
+        }
+        
+        // 4) CORE layer (sharp center line)
+        var core = LineLayer(id: "neon-core", source: "neon-streets")
+        core.sourceLayer = "road"
+        core.filter = roadFilter
+        core.lineColor = .constant(neonCore)
+        core.lineOpacity = .constant(1.0)
+        core.lineWidth = .expression(thinByZoom)
+        core.lineCap = .constant(.round)
+        core.lineJoin = .constant(.round)
+        do {
+            try self.mapboxMap.addLayer(core)
+            print("[map] ✅ Added neon core layer")
+        } catch {
+            print("[map] ❌ Failed to add core layer: \(error)")
+        }
+        
+        // 5) Add buildings back with dark styling
+        var buildings = FillExtrusionLayer(id: "neon-buildings", source: "neon-streets")
+        buildings.sourceLayer = "building"
+        buildings.fillExtrusionColor = .constant(StyleColor(UIColor(red: 0.1, green: 0.1, blue: 0.2, alpha: 1)))
+        buildings.fillExtrusionHeight = .expression(Exp(.get) { "height" })
+        buildings.fillExtrusionOpacity = .constant(0.8)
+        do {
+            try self.mapboxMap.addLayer(buildings)
+            print("[map] ✅ Added buildings layer")
+        } catch {
+            print("[map] ❌ Failed to add buildings: \(error)")
+        }
+        
+        // 6) Add landcover/trees back with dark green styling
+        var landcover = FillLayer(id: "neon-landcover", source: "neon-streets")
+        landcover.sourceLayer = "landcover"
+        landcover.fillColor = .expression(Exp(.match) {
+            Exp(.get) { "class" }
+            [
+                "wood": "#003300",
+                "grass": "#002600", 
+                "scrub": "#001a00"
+            ]
+            "#0d0d0d" // default dark gray
+        })
+        landcover.fillOpacity = .constant(0.6)
+        do {
+            try self.mapboxMap.addLayer(landcover, layerPosition: .below("neon-glow"))
+            print("[map] ✅ Added landcover/trees layer")
+        } catch {
+            print("[map] ❌ Failed to add landcover: \(error)")
+        }
+        
+        // 7) Darken water - try to update existing layer
+        try? self.mapboxMap.setLayerProperty(for: "water", property: "fill-color", value: "#001122")
+        
+        print("[map] ✨ Neon Grid style applied successfully!")
+    }
+}
+
+#Preview {
+    ContentView()
+}

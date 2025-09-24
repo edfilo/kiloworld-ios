@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>MBXAccessToken</key>
+	<string>sk.eyJ1Ijoia2lsb3dvcmxkIiwiYSI6ImNtZnI5MjFydzA3NzcyaW9pMXRhbHRodHcifQ.5bFdB3fGFt3rYtC5mpn11w</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>This app needs location access to show your position on the map and enable location-based features.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>This app uses motion activity data to detect walking and running for accurate journey tracking and to prevent driving from being counted as walking distance.</string>
+</dict>
+</plist>
