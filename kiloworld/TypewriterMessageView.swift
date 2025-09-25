@@ -18,22 +18,16 @@ struct TypewriterMessageView: View {
     var body: some View {
         GeometryReader { geometry in
             VStack {
-                // Position at 30% from top of screen
+                // Position at 30% from top of screen + 100px lower
                 Spacer()
-                    .frame(height: geometry.size.height * 0.3)
+                    .frame(height: geometry.size.height * 0.3 + 100)
                 
                 HStack {
                     Spacer()
                     
                     Text(displayedText + (showCursor && currentIndex < latestMessage.count ? "|" : ""))
                         .font(.system(size: 18, weight: .medium, design: .monospaced))
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [.cyan, .blue, .purple],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
+                        .foregroundColor(.cyan.opacity(0.9))
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 20)
                         .shadow(color: .cyan.opacity(0.5), radius: 3, x: 0, y: 1)

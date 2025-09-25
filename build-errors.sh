@@ -4,14 +4,42 @@
 
 set -euo pipefail
 
-DEVICE_ID="00008140-000A292A0CE0801C"
+DEVICE_ID="C711B759-365B-5F0F-B096-34B2966475DB"
 BUNDLE_ID="com.filowatt.kiloworld"
 PROJECT="kiloworld.xcodeproj"
 SCHEME="kiloworld"
 
+# Function to check device availability
+check_device() {
+    echo "📱 Checking device availability..."
+    
+    # Check if device is connected and available
+    if ! xcrun devicectl list devices | grep -q "$DEVICE_ID"; then
+        echo "❌ Device $DEVICE_ID not found or not connected"
+        echo "💡 Please connect your iPhone and trust this computer"
+        return 1
+    fi
+    
+    # Try to get device info to verify it's unlocked and ready
+    if ! xcrun devicectl device info --device "$DEVICE_ID" &>/dev/null; then
+        echo "⚠️  Device found but may be locked or not trusted"
+        echo "💡 Please unlock your device and trust this computer if prompted"
+        echo "⏳ Continuing anyway - build will fail if device is locked..."
+    else
+        echo "✅ Device ready for building"
+    fi
+    
+    return 0
+}
+
 # Function to extract and show build errors
 show_build_errors() {
     echo "🔍 Checking for build errors..."
+    
+    # Check device first
+    if ! check_device; then
+        return 1
+    fi
     
     # Always build when explicitly run - skip optimization checks
     echo "🔨 Running targeted build to catch all errors..."

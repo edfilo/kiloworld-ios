@@ -20,6 +20,8 @@ struct UserModalView: View {
     @Binding var globalSize: Float // Binding to control particle size
     @Binding var depthAmount: Float // Binding to control particle depth
     @ObservedObject var userSettings: UserSettings // User settings for hologram controls
+    @Binding var generatedImages: [String] // Generated images from Firebase
+    @Binding var sessionXid: String? // Current session XID
     @State private var showingDeleteAlert = false
     @State private var journeyToDelete: JourneySession?
     
@@ -30,7 +32,10 @@ struct UserModalView: View {
         NavigationView {
             ScrollView {
                 VStack(spacing: 20) {
-                    // Hologram Controls Section (moved to top)
+                    // Debug Section (top)
+                    debugSection
+                    
+                    // Hologram Controls Section
                     hologramControlsSection
                     
                     // Current Journey Section
@@ -70,6 +75,61 @@ struct UserModalView: View {
         }
     }
     
+    private var debugSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Firebase Debug")
+                .font(.headline)
+                .fontWeight(.bold)
+                .foregroundColor(.white)
+            
+            VStack(alignment: .leading, spacing: 8) {
+                // Session XID
+                HStack {
+                    Text("Session XID:")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.7))
+                    Spacer()
+                    Text(sessionXid ?? "None")
+                        .font(.caption)
+                        .foregroundColor(.white)
+                }
+                
+                // Generated Images Count
+                HStack {
+                    Text("Generated Images:")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.7))
+                    Spacer()
+                    Text("\(generatedImages.count)")
+                        .font(.caption)
+                        .foregroundColor(.white)
+                }
+                
+                // Generated Images URLs
+                if !generatedImages.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Image URLs:")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.7))
+                        
+                        ForEach(generatedImages, id: \.self) { imageUrl in
+                            Text(imageUrl)
+                                .font(.system(size: 10))
+                                .foregroundColor(.cyan)
+                                .lineLimit(3)
+                        }
+                    }
+                }
+            }
+            .padding()
+            .background(Color.gray.opacity(0.1))
+            .cornerRadius(8)
+        }
+        .padding()
+        .background(Color.black.opacity(0.05))
+        .cornerRadius(12)
+    }
+    
     private var currentJourneySection: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Current Journey")
@@ -105,24 +165,44 @@ struct UserModalView: View {
                 .background(Color.gray.opacity(0.1))
                 .cornerRadius(8)
                 
-                HStack(spacing: 12) {
-                    Button("Publish Walk") {
+                VStack(spacing: 8) {
+                    // Main save button - prominent
+                    Button("Save Journey & Start New") {
                         pathStorage.publishCurrentJourney()
+                        // Start a new journey automatically after saving
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                            pathStorage.clearCurrentPath()
+                        }
                     }
                     .foregroundColor(.white)
                     .padding()
-                    .background(Color.green)
+                    .frame(maxWidth: .infinity)
+                    .background(Color.blue)
                     .cornerRadius(8)
                     .disabled(pathStorage.currentPath.isEmpty)
                     
-                    Button("Clear Path") {
-                        pathStorage.clearCurrentPath()
+                    // Secondary buttons - smaller
+                    HStack(spacing: 8) {
+                        Button("Just Publish") {
+                            pathStorage.publishCurrentJourney()
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.green)
+                        .cornerRadius(6)
+                        .disabled(pathStorage.currentPath.isEmpty)
+                        
+                        Button("Clear Only") {
+                            pathStorage.clearCurrentPath()
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.red)
+                        .cornerRadius(6)
+                        .disabled(pathStorage.currentPath.isEmpty)
                     }
-                    .foregroundColor(.white)
-                    .padding()
-                    .background(Color.red)
-                    .cornerRadius(8)
-                    .disabled(pathStorage.currentPath.isEmpty)
                 }
             }
         }
@@ -376,7 +456,7 @@ struct UserModalView: View {
                         .fontWeight(.medium)
                         .foregroundColor(.white)
                 }
-                Slider(value: $userSettings.hologramZoom, in: 0.1...2.0, step: 0.1)
+                Slider(value: $userSettings.hologramZoom, in: 0.01...1.0, step: 0.01)
             }
             
             // Depth Slider
@@ -453,6 +533,67 @@ struct UserModalView: View {
                 }
                 Slider(value: $userSettings.hologramYPosition, in: -1.0...1.0, step: 0.05)
             }
+
+            // Particle Count Slider
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Particle Count")
+                        .font(.subheadline)
+                        .foregroundColor(.white)
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(formatParticleCount(userSettings.hologramParticleCount))
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .foregroundColor(.white)
+                        Text(getPerformanceIndicator(userSettings.hologramParticleCount))
+                            .font(.system(size: 9))
+                            .foregroundColor(getPerformanceColor(userSettings.hologramParticleCount))
+                    }
+                }
+                Slider(value: $userSettings.hologramParticleCount, in: 1000...100000, step: 1000, onEditingChanged: { editing in
+                    if !editing {
+                        // User released the slider - trigger particle system rebuild
+                        print("🔄 Particle count changed to \(Int(userSettings.hologramParticleCount)) - will rebuild system")
+                        // TODO: Implement particle system rebuild logic
+                    }
+                })
+
+                // Preset buttons for common particle counts
+                HStack(spacing: 8) {
+                    Button("Fast (5K)") {
+                        userSettings.hologramParticleCount = 5000
+                    }
+                    .font(.caption)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.green.opacity(0.2))
+                    .foregroundColor(.green)
+                    .cornerRadius(4)
+
+                    Button("Balanced (30K)") {
+                        userSettings.hologramParticleCount = 30000
+                    }
+                    .font(.caption)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.blue.opacity(0.2))
+                    .foregroundColor(.blue)
+                    .cornerRadius(4)
+
+                    Button("Beautiful (75K)") {
+                        userSettings.hologramParticleCount = 75000
+                    }
+                    .font(.caption)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.purple.opacity(0.2))
+                    .foregroundColor(.purple)
+                    .cornerRadius(4)
+
+                    Spacer()
+                }
+            }
         }
         .padding()
         .background(Color.black.opacity(0.2))
@@ -465,6 +606,42 @@ struct UserModalView: View {
             return
         }
         mapCoordinator?.updateCameraZoom(zoom, userLocation: userLocation)
+    }
+
+    // Particle count formatting and performance helpers
+    private func formatParticleCount(_ count: Float) -> String {
+        let intCount = Int(count)
+        if intCount >= 1000 {
+            return String(format: "%.0fK", count / 1000)
+        } else {
+            return "\(intCount)"
+        }
+    }
+
+    private func getPerformanceIndicator(_ count: Float) -> String {
+        switch count {
+        case 0...15000:
+            return "Fast"
+        case 15001...50000:
+            return "Balanced"
+        case 50001...75000:
+            return "Detailed"
+        default:
+            return "Intensive"
+        }
+    }
+
+    private func getPerformanceColor(_ count: Float) -> Color {
+        switch count {
+        case 0...15000:
+            return .green
+        case 15001...50000:
+            return .blue
+        case 50001...75000:
+            return .orange
+        default:
+            return .red
+        }
     }
 }
 

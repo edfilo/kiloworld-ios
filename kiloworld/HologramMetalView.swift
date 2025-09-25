@@ -22,6 +22,7 @@ struct ImageParticle {
     var looseness: Float
     var velocity: SIMD3<Float>
     var pixelCoord: SIMD2<Float>
+    var emissionSeed: Float // Random seed for emission timing, set once at creation
 }
 
 struct Uniforms {
@@ -39,6 +40,7 @@ struct Uniforms {
     var centerPoint: SIMD3<Float>
     var imageDimensions: SIMD2<Float>
     var aspectRatio: Float
+    var puckWorldPosition: SIMD3<Float> // Puck position for emission lifecycle
     var _pad0: Float = 0
 }
 
@@ -47,6 +49,7 @@ struct HologramMetalView: UIViewRepresentable {
     let globalSize: Float
     let metalSynth: MetalWavetableSynth?
     @ObservedObject var userSettings: UserSettings
+    let puckScreenPosition: CGPoint
     @Binding var coordinator: HologramCoordinator?
     
     func makeUIView(context: Context) -> MTKView {
@@ -76,6 +79,7 @@ struct HologramMetalView: UIViewRepresentable {
         context.coordinator.setDepthAmount(depthAmount)
         context.coordinator.setGlobalSize(globalSize)
         context.coordinator.updateHologramSettings(userSettings)
+        context.coordinator.setPuckScreenPosition(puckScreenPosition)
     }
     
     func makeCoordinator() -> HologramCoordinator {
@@ -109,6 +113,14 @@ struct HologramMetalView: UIViewRepresentable {
         private var dissolve: Float = 0.0
         private var wobble: Float = 0.0
         private var yOffset: Float = 0.0
+        
+        // Puck emission system - lifecycle phase for existing particles
+        private var puckScreenPosition: CGPoint = CGPoint(x: 0, y: 0)
+        private let maxEmittingParticles = 150 // How many particles emit at once
+
+        // Particle count management
+        private var currentParticleCount: Int = 30000
+        private var particleRebuildTimer: Timer?
         
         // Camera parameters
         private var cameraEye = SIMD3<Float>(0, 0, 250)
@@ -146,6 +158,10 @@ struct HologramMetalView: UIViewRepresentable {
             setupMetal()
             loadParticlesFromImages()
         }
+
+        deinit {
+            particleRebuildTimer?.invalidate()
+        }
         
         func setMTKView(_ view: MTKView) {
             mtkView = view
@@ -174,6 +190,63 @@ struct HologramMetalView: UIViewRepresentable {
             dissolve = settings.hologramDissolve
             wobble = settings.hologramWobble
             yOffset = settings.hologramYPosition * 250.0 // Map -1 to +1 to -250 to +250 units (positive = up) - 2.5x higher
+
+            // Check for particle count changes
+            let newParticleCount = Int(settings.hologramParticleCount)
+            let countDifference = abs(newParticleCount - currentParticleCount)
+            let percentageChange = Float(countDifference) / Float(currentParticleCount)
+
+            // If particle count changed by more than 10% or by more than 5000 particles, schedule rebuild
+            if percentageChange > 0.1 || countDifference > 5000 {
+                print("🔄 Particle count change detected: \(currentParticleCount) → \(newParticleCount) (\(Int(percentageChange * 100))% change)")
+                scheduleParticleRebuild(newCount: newParticleCount)
+            }
+        }
+        
+        func setPuckScreenPosition(_ position: CGPoint) {
+            puckScreenPosition = position
+            // Screen position is stored and converted to world coordinates each frame
+            // This ensures the emission point stays at the same screen location regardless of zoom
+        }
+
+        private func scheduleParticleRebuild(newCount: Int) {
+            // Cancel any existing timer
+            particleRebuildTimer?.invalidate()
+
+            // Schedule new rebuild with 0.5s debouncing
+            particleRebuildTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
+                self?.rebuildParticleSystem(targetCount: newCount)
+            }
+        }
+
+        private func rebuildParticleSystem(targetCount: Int) {
+            print("🔨 Rebuilding particle system with \(targetCount) particles...")
+
+            // Update current count
+            currentParticleCount = targetCount
+
+            // Reload particles with new target count
+            loadParticlesFromImages(targetCount: targetCount)
+
+            print("✅ Particle system rebuilt with \(particleCount) particles")
+        }
+        
+        
+        private func refreshParticleBuffer() {
+            guard let particleBuffer = particleBuffer else { return }
+            
+            // All particles are now regular hologram particles with emission lifecycle
+            particleCount = particles.count
+            
+            // Update GPU buffer
+            let bufferSize = MemoryLayout<ImageParticle>.stride * particleCount
+            if bufferSize <= particleBuffer.length {
+                // Buffer is large enough, just copy data
+                particleBuffer.contents().copyMemory(from: particles, byteCount: bufferSize)
+            } else {
+                // Need to recreate buffer (this should rarely happen)
+                self.particleBuffer = device.makeBuffer(bytes: particles, length: bufferSize, options: [])
+            }
         }
         
         // MARK: - SkyGate Control Methods
@@ -235,6 +308,7 @@ struct HologramMetalView: UIViewRepresentable {
                 float  looseness;
                 float3 velocity;
                 float2 pixelCoord;
+                float  emissionSeed; // Random seed for emission timing
             };
 
             struct Uniforms {
@@ -252,6 +326,7 @@ struct HologramMetalView: UIViewRepresentable {
                 float3 centerPoint;
                 float2 imageDimensions;
                 float aspectRatio;
+                float3 puckWorldPosition; // Puck position for emission lifecycle
                 float _pad0;
             };
 
@@ -372,12 +447,14 @@ struct HologramMetalView: UIViewRepresentable {
                 
                 // Apply Y offset to move hologram up/down
                 hologramPos.y += uniforms.yOffset;
-
+                
+                // Hash values for randomness
+                float hash1 = fract(sin(dot(particle.originalPosition.xy, float2(12.9898, 78.233))) * 43758.5453);
+                float hash2 = fract(sin(dot(particle.originalPosition.yx, float2(39.346, 11.135))) * 43758.5453);
+                float hash3 = fract(sin(dot(particle.originalPosition.xz, float2(93.989, 1.233))) * 43758.5453);
+                
                 // Wobble effect
                 if (uniforms.wobble > 0.0) {
-                    float hash1 = fract(sin(dot(particle.originalPosition.xy, float2(12.9898, 78.233))) * 43758.5453);
-                    float hash2 = fract(sin(dot(particle.originalPosition.yx, float2(39.346, 11.135))) * 43758.5453);
-                    float hash3 = fract(sin(dot(particle.originalPosition.xz, float2(93.989, 1.233))) * 43758.5453);
                     
                     float time1 = uniforms.time + hash1 * 6.28;
                     float time2 = uniforms.time + hash2 * 6.28;
@@ -389,7 +466,53 @@ struct HologramMetalView: UIViewRepresentable {
                     hologramPos.z += sin(time3 * 2.3) * wobbleAmount * hash3;
                 }
 
-                particle.looseness = normalizedDepth;
+                // Natural fountain emission from puck to hologram
+                float emission_cycle = uniforms.time * 0.7; // Faster, more visible cycles
+
+                // Use the random emission seed for staggered timing
+                float particle_emission_time = fmod(particle.emissionSeed * 12.0 + emission_cycle, 15.0); // 15 second cycles
+
+                // Only emit particles that aren't hidden by background hide
+                bool would_be_hidden = false;
+                if (uniforms.bgHide > 0.0) {
+                    float fadeStart = 1.0 - uniforms.bgHide;
+                    would_be_hidden = (normalizedDepth >= fadeStart);
+                }
+
+                // 20% of particles emitting at any time for continuous stream effect, but only if not hidden
+                bool is_emitting = (particle_emission_time < 3.0) && !would_be_hidden;
+
+                if (is_emitting) {
+                    // Natural fountain physics: particles travel from puck screen position to hologram
+                    float emission_progress = particle_emission_time / 3.0; // 0.0 = start, 1.0 = end
+
+                    // Smooth trajectory curve (ease-out for natural deceleration)
+                    float t = 1.0 - pow(1.0 - emission_progress, 2.0);
+
+                    // Start position: puck world position
+                    float3 startPos = uniforms.puckWorldPosition;
+
+                    // End position: final hologram position
+                    float3 endPos = hologramPos;
+
+                    // Add natural fountain arc
+                    float arc_height = sin(emission_progress * 3.14159) * 50.0;
+                    float3 arcPos = mix(startPos, endPos, t);
+                    arcPos.y += arc_height;
+
+                    // Gentle sway for natural motion
+                    arcPos.x += sin(emission_progress * 6.0 + particle.emissionSeed * 10.0) * 8.0;
+                    arcPos.z += cos(emission_progress * 4.0 + particle.emissionSeed * 12.0) * 5.0;
+
+                    hologramPos = arcPos;
+
+                    // Keep original particle colors during fountain emission
+                    particle.size = 1.5; // Slightly larger for visibility
+                    particle.looseness = 0.0; // Foreground particles - immune to background hiding
+                } else {
+                    // Normal hologram behavior
+                    particle.looseness = normalizedDepth;
+                }
                 particle.position = hologramPos;
 
                 if (particle.position.z < -150.0) {
@@ -427,7 +550,7 @@ struct HologramMetalView: UIViewRepresentable {
             }
         }
         
-        private func loadParticlesFromImages() {
+        private func loadParticlesFromImages(targetCount: Int = 30000) {
             print("📷 Loading hologram particles from images...")
             
             // Debug: List available resources
@@ -446,7 +569,7 @@ struct HologramMetalView: UIViewRepresentable {
                   let depthImagePath = Bundle.main.path(forResource: "edkilo_mask", ofType: "png") else {
                 print("❌ Failed to find image paths in bundle")
                 print("🔍 Trying alternative approach...")
-                loadTestPatternParticles()
+                loadTestPatternParticles(targetCount: targetCount)
                 return
             }
             
@@ -456,7 +579,7 @@ struct HologramMetalView: UIViewRepresentable {
                   let depthCGImage = depthImage.cgImage else {
                 print("❌ Failed to load edkilo.png and edkilo_mask.png images from paths")
                 print("🔍 Trying alternative approach...")
-                loadTestPatternParticles()
+                loadTestPatternParticles(targetCount: targetCount)
                 return
             }
             
@@ -496,7 +619,7 @@ struct HologramMetalView: UIViewRepresentable {
             originalContext.draw(originalCGImage, in: CGRect(x: 0, y: 0, width: width, height: height))
             depthContext.draw(depthCGImage, in: CGRect(x: 0, y: 0, width: width, height: height))
             
-            let targetParticles = 30_000
+            let targetParticles = targetCount
             let availablePixels = width * height
             let baseSampleRate = max(1, Int((Float(availablePixels) / Float(targetParticles)).squareRoot()))
             print("📐 Using sample rate: \(baseSampleRate)")
@@ -529,7 +652,10 @@ struct HologramMetalView: UIViewRepresentable {
                     // Category from brightness
                     let brightness = (r + g + b) / 3.0
                     let category: Float = (brightness < 0.2) ? 0.0 : (brightness < 0.5) ? 1.0 : (brightness < 0.8) ? 2.0 : 3.0
-                    
+
+                    // Simple random emission seed - no need for complex hashing
+                    let emissionSeed = Float.random(in: 0...1)
+
                     tempParticles.append(
                         ImageParticle(
                             position: SIMD3<Float>(posX, posY, posZ),
@@ -540,7 +666,8 @@ struct HologramMetalView: UIViewRepresentable {
                             category: category,
                             looseness: 0.0,
                             velocity: .zero,
-                            pixelCoord: SIMD2<Float>(Float(x), Float(y))
+                            pixelCoord: SIMD2<Float>(Float(x), Float(y)),
+                            emissionSeed: emissionSeed // Random seed for emission timing
                         )
                     )
                     
@@ -559,9 +686,21 @@ struct HologramMetalView: UIViewRepresentable {
             // Sort back-to-front (optional with depth test; harmless here)
             tempParticles.sort { $0.position.z > $1.position.z }
             
+            // All particles are hologram particles with emission lifecycle
             particles = tempParticles
             particleCount = particles.count
-            print("✅ Created \(particleCount) particles from images")
+
+            // Debug: Check depth distribution
+            let depths = particles.map { (($0.originalPosition.z - 20.0) / 60.0) } // Convert Z back to depth
+            let minDepth = depths.min() ?? 0
+            let maxDepth = depths.max() ?? 0
+            let avgDepth = depths.reduce(0, +) / Float(depths.count)
+            print("✅ Created \(tempParticles.count) particles - Depth range: \(minDepth)-\(maxDepth), avg: \(avgDepth)")
+
+            // Check how many particles are in front vs back
+            let frontCount = depths.filter { $0 < 0.3 }.count
+            let backCount = depths.filter { $0 > 0.7 }.count
+            print("📊 Particle depth distribution: Front(\(frontCount)) vs Back(\(backCount))")
             
             // GPU buffers
             let bufferSize = MemoryLayout<ImageParticle>.stride * particleCount
@@ -577,12 +716,12 @@ struct HologramMetalView: UIViewRepresentable {
             print("✅ Buffers ready")
         }
         
-        private func loadTestPatternParticles() {
+        private func loadTestPatternParticles(targetCount: Int = 30000) {
             print("📷 Loading fallback test pattern particles...")
             
             // Create a simple test pattern as fallback
             var tempParticles: [ImageParticle] = []
-            let gridSize = 100
+            let gridSize = Int(sqrt(Float(targetCount))) // Dynamic grid size based on target count
             
             for x in 0..<gridSize {
                 for y in 0..<gridSize {
@@ -595,7 +734,10 @@ struct HologramMetalView: UIViewRepresentable {
                     let r = sin(hue) * 0.5 + 0.5
                     let g = sin(hue + 2.0) * 0.5 + 0.5
                     let b = sin(hue + 4.0) * 0.5 + 0.5
-                    
+
+                    // Simple random emission seed - no need for complex hashing
+                    let emissionSeed = Float.random(in: 0...1)
+
                     tempParticles.append(
                         ImageParticle(
                             position: SIMD3<Float>(posX, posY, posZ),
@@ -606,12 +748,14 @@ struct HologramMetalView: UIViewRepresentable {
                             category: Float(x % 4),
                             looseness: 0.0,
                             velocity: .zero,
-                            pixelCoord: SIMD2<Float>(Float(x), Float(y))
+                            pixelCoord: SIMD2<Float>(Float(x), Float(y)),
+                            emissionSeed: emissionSeed // Random seed for emission timing
                         )
                     )
                 }
             }
             
+            // All particles are hologram particles with emission lifecycle
             particles = tempParticles
             particleCount = particles.count
             
@@ -757,9 +901,81 @@ struct HologramMetalView: UIViewRepresentable {
             let viewM = lookAtRH(eye: zoomedCameraEye, center: cameraCenter, up: cameraUp)
             let mvp = proj * viewM
             
-            // Update uniforms
+            // Helper function to convert puck coordinates properly
+            func puckPointInLocalPixels(for view: MTKView, puckPointInScreenPoints: CGPoint) -> CGPoint {
+                // 1) Convert from screen/window coordinates into the MTKView's local coordinates (points).
+                // If your puck point is already in the MTKView's coords, this conversion is a no-op.
+                let localInPoints: CGPoint = {
+                    if let window = view.window {
+                        // Treat the input as window (screen) coordinates by default
+                        return view.convert(puckPointInScreenPoints, from: window)
+                    } else {
+                        // Fallback: assume it's already local
+                        return puckPointInScreenPoints
+                    }
+                }()
+
+                // Clamp just in case (optional safety)
+                let clampedX = max(0, min(localInPoints.x, view.bounds.width))
+                let clampedY = max(0, min(localInPoints.y, view.bounds.height))
+
+                // 2) Points → Pixels using display scale
+                let scale = view.window?.screen.scale ?? view.contentScaleFactor
+                return CGPoint(x: clampedX * scale, y: clampedY * scale)
+            }
+
+            // Choose the plane where you want the emitter to live
+            let planeZ: Float = 50.0 + yOffset
+
+            // Resolve a fallback if no puck provided
+            let fallback = CGPoint(x: view.bounds.width / 2, y: view.bounds.height * 0.75)
+            let puckPoints = (puckScreenPosition == .zero) ? fallback : puckScreenPosition
+
+            // 1) Get the puck point in this MTKView's local *pixels*
+            let puckLocalPixels = puckPointInLocalPixels(for: view, puckPointInScreenPoints: puckPoints)
+
+            // 2) Pixels → NDC using drawableSize (also in pixels)
+            let dw = max(view.drawableSize.width,  1)
+            let dh = max(view.drawableSize.height, 1)
+            let ndcX = Float((puckLocalPixels.x / dw) * 2.0 - 1.0)
+            // UIKit Y grows downward; NDC Y grows upward
+            let ndcY = Float(1.0 - (puckLocalPixels.y / dh) * 2.0)
+
+            // 3) Unproject near/far clip points
+            let nearClip = SIMD4<Float>(ndcX, ndcY, -1.0, 1.0)
+            let farClip  = SIMD4<Float>(ndcX, ndcY,  1.0, 1.0)
+
+            let invProj = simd_inverse(proj)
+            let invView = simd_inverse(viewM)
+
+            var nearView = invProj * nearClip
+            var farView  = invProj * farClip
+            nearView /= nearView.w
+            farView  /= farView.w
+
+            var nearWorld = invView * nearView
+            var farWorld  = invView * farView
+            nearWorld /= nearWorld.w
+            farWorld  /= farWorld.w
+
+            let rayOrigin = SIMD3<Float>(nearWorld.x, nearWorld.y, nearWorld.z)
+            let rayEnd    = SIMD3<Float>(farWorld.x,  farWorld.y,  farWorld.z)
+            let rayDir    = simd_normalize(rayEnd - rayOrigin)
+
+            // 4) Intersect with z = planeZ
+            var puckWorldPos = SIMD3<Float>(0, 0, planeZ)
+            let denom = rayDir.z
+            if abs(denom) > 1e-6 {
+                let t = (planeZ - rayOrigin.z) / denom
+                let hit = rayOrigin + t * rayDir
+                puckWorldPos = SIMD3<Float>(hit.x, hit.y, planeZ)
+            }
+
+            print("🎯 Puck conversion: screenPoints=\(puckPoints) → localPixels=\(puckLocalPixels) → NDC=(\(ndcX),\(ndcY)) → worldPos=\(puckWorldPos)")
+
+            // 6) Fill uniforms with this *unprojected* world position
             var uniforms = Uniforms(
-                mvpMatrix: mvp,
+                mvpMatrix: proj * viewM,
                 viewMatrix: viewM,
                 rotation: rotation,
                 time: time,
@@ -773,6 +989,7 @@ struct HologramMetalView: UIViewRepresentable {
                 centerPoint: centerPoint,
                 imageDimensions: imageDimensions,
                 aspectRatio: aspect,
+                puckWorldPosition: puckWorldPos,
                 _pad0: 0
             )
             uniformBuffer.contents().copyMemory(from: &uniforms, byteCount: MemoryLayout<Uniforms>.size)

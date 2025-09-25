@@ -282,6 +282,22 @@ struct NeonGridMapView: UIViewRepresentable {
             )
         }
         
+        // Calculate puck's screen position based on current padding and screen size
+        func getPuckScreenPosition() -> CGPoint? {
+            guard let mapView = mapView else { return nil }
+            
+            let padding = getPuckPadding()
+            let viewBounds = mapView.bounds
+            
+            // Puck appears in the center of the "padded" area
+            // With top padding, the effective center moves down
+            let puckX = viewBounds.width / 2 // Always centered horizontally
+            let effectiveHeight = viewBounds.height - padding.top - padding.bottom
+            let puckY = padding.top + (effectiveHeight / 2)
+            
+            return CGPoint(x: puckX, y: puckY)
+        }
+        
         // SINGLE camera update function - ALL camera changes go through here
         func updateCamera(
             userLocation: CLLocationCoordinate2D,

@@ -192,7 +192,6 @@ struct ChatView: View {
                 .disabled(messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .padding(.horizontal, 5) // 5px from edges
-            .padding(.bottom, 5) // 5px from bottom
         }
     }
     

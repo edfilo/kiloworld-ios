@@ -21,8 +21,21 @@ extension MapView {
         } catch {
             print("[map] ❌ Failed to add background: \(error)")
         }
+
+        // 2) Add stars layer using Mapbox's sky layer
+        var skyLayer = SkyLayer(id: "stars-sky")
+        skyLayer.skyType = .constant(.atmosphere)
+        skyLayer.skyAtmosphereSun = .constant([0.0, 90.0]) // Sun at zenith (creates dark sky)
+        skyLayer.skyAtmosphereSunIntensity = .constant(0.1) // Very low sun intensity for dark sky
+        skyLayer.skyOpacity = .constant(0.8)
+        do {
+            try self.mapboxMap.addLayer(skyLayer, layerPosition: .at(1))
+            print("[map] ✅ Added stars sky layer")
+        } catch {
+            print("[map] ❌ Failed to add stars sky layer: \(error)")
+        }
         
-        // 2) Streets source (Mapbox Streets v8)
+        // 3) Streets source (Mapbox Streets v8)
         var streets = VectorSource(id: "neon-streets")
         streets.url = "mapbox://mapbox.mapbox-streets-v8"
         do {
@@ -73,7 +86,7 @@ extension MapView {
             18; 6.0
         }
         
-        // 3) GLOW layer (fat, blurred, low opacity)
+        // 4) GLOW layer (fat, blurred, low opacity)
         var glow = LineLayer(id: "neon-glow", source: "neon-streets")
         glow.sourceLayer = "road"
         glow.filter = roadFilter
@@ -96,7 +109,7 @@ extension MapView {
             print("[map] ❌ Failed to add glow layer: \(error)")
         }
         
-        // 4) CORE layer (sharp center line)
+        // 5) CORE layer (sharp center line)
         var core = LineLayer(id: "neon-core", source: "neon-streets")
         core.sourceLayer = "road"
         core.filter = roadFilter

@@ -91,6 +91,9 @@ struct ContentView: View {
     // Reference to hologram coordinator for SkyGate control
     @State private var hologramCoordinator: HologramMetalView.HologramCoordinator?
     
+    // Puck screen position for particle emission
+    @State private var puckScreenPosition: CGPoint = CGPoint(x: 0, y: 0)
+    
     // Create MetalWavetableSynth once for sharing between components
     @State private var metalSynth: MetalWavetableSynth? = {
         // Initialize synth immediately so it's available when map loads
@@ -139,6 +142,12 @@ struct ContentView: View {
                 actualPitch = cameraState.pitch
                 actualCenter = cameraState.center
                 actualBearing = cameraState.bearing
+                
+                // Update puck screen position for hologram particle emission
+                if let mapCoordinator = mapCoordinator,
+                   let puckPosition = mapCoordinator.getPuckScreenPosition() {
+                    puckScreenPosition = puckPosition
+                }
                 
                 // IMPORTANT: Update viewport to match actual camera to prevent snap-back
                 // BUT don't update during compass rotation as it will override anchor point
@@ -250,6 +259,28 @@ struct ContentView: View {
                 .padding(.leading, 8)
             }
             
+            // Gradient mask that fades map from transparent to black at bottom
+            VStack(spacing: 0) {
+                Spacer()
+                
+                // Gradient overlay that masks map behind chat area and extends to screen bottom
+                LinearGradient(
+                    gradient: Gradient(stops: [
+                        .init(color: .clear, location: 0.0),          // Fully transparent at top
+                        .init(color: .clear, location: 0.3),          // Stay transparent
+                        .init(color: .black.opacity(0.1), location: 0.5), // Start fading
+                        .init(color: .black.opacity(0.4), location: 0.7), // More opacity
+                        .init(color: .black.opacity(0.8), location: 0.9), // Almost opaque
+                        .init(color: .black, location: 1.0)           // Fully opaque at bottom
+                    ]),
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .allowsHitTesting(false) // Don't intercept touches
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity) // Fill entire screen
+            .ignoresSafeArea(.all) // Extend to absolute screen edges
+            
             // Chat interface positioned 5px from safe areas
             VStack {
                 Spacer()
@@ -295,6 +326,7 @@ struct ContentView: View {
                 globalSize: globalSize,
                 metalSynth: metalSynth,
                 userSettings: userSettings,
+                puckScreenPosition: puckScreenPosition,
                 coordinator: $hologramCoordinator
             )
             .allowsHitTesting(false) // Disable touch to let map/skygate handle touches
@@ -311,7 +343,9 @@ struct ContentView: View {
                 defaultZoom: $defaultZoom,
                 globalSize: $globalSize,
                 depthAmount: $depthAmount,
-                userSettings: userSettings
+                userSettings: userSettings,
+                generatedImages: $generatedImages,
+                sessionXid: $sessionXid
             )
         }
         .onAppear {
@@ -356,7 +390,7 @@ struct ContentView: View {
             
             // Add initial journey message to chat
             if chatMessages.isEmpty {
-                chatMessages.append(ChatMessage(role: "assistant", content: "lets go on a journey in the kiloverse. what are you thinking about right now?"))
+                chatMessages.append(ChatMessage(role: "assistant", content: "welcome to the kiloverse! what sparks your curiosity?"))
             }
             
             // Try to start at user location if available

@@ -58,6 +58,10 @@ class UserSettings: ObservableObject {
     @Published var hologramYPosition: Float = 0.0 {
         didSet { userDefaults.set(hologramYPosition, forKey: "hologram_y_position") }
     }
+
+    @Published var hologramParticleCount: Float = 30000.0 {
+        didSet { userDefaults.set(hologramParticleCount, forKey: "hologram_particle_count") }
+    }
     
     // MARK: - Initialization
     
@@ -104,6 +108,9 @@ class UserSettings: ObservableObject {
         if userDefaults.object(forKey: "hologram_y_position") != nil {
             hologramYPosition = userDefaults.float(forKey: "hologram_y_position")
         }
+        if userDefaults.object(forKey: "hologram_particle_count") != nil {
+            hologramParticleCount = userDefaults.float(forKey: "hologram_particle_count")
+        }
         
         print("[settings] 📱 Loaded UI settings and hologram controls")
     }
@@ -122,6 +129,7 @@ class UserSettings: ObservableObject {
         hologramDissolve = 0.0
         hologramWobble = 0.0
         hologramYPosition = 0.0
+        hologramParticleCount = 30000.0
         print("[settings] 🔄 Reset to default settings")
     }
 }
