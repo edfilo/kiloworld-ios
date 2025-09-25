@@ -37,11 +37,15 @@ struct Uniforms {
     var dissolve: Float
     var wobble: Float
     var yOffset: Float
-    var centerPoint: SIMD3<Float>
+    var centerPoint: SIMD4<Float>         // <- was SIMD3
     var imageDimensions: SIMD2<Float>
     var aspectRatio: Float
-    var puckWorldPosition: SIMD3<Float> // Puck position for emission lifecycle
-    var _pad0: Float = 0
+    var _padA: Float = 0                  // pad to 16B boundary
+    var puckWorldPosition: SIMD4<Float>   // <- was SIMD3
+    var emissionDensity: Float            // 0..1
+    var emissionPeriodSec: Float          // P
+    var travelTimeSec: Float              // T
+    var arcHeight: Float                  // arc height
 }
 
 struct HologramMetalView: UIViewRepresentable {
@@ -113,6 +117,10 @@ struct HologramMetalView: UIViewRepresentable {
         private var dissolve: Float = 0.0
         private var wobble: Float = 0.0
         private var yOffset: Float = 0.0
+        private var emissionDensity: Float = 0.8
+        private var emissionPeriodSec: Float = 8.0
+        private var travelTimeSec: Float = 5.0
+        private var arcHeight: Float = 50.0
         
         // Puck emission system - lifecycle phase for existing particles
         private var puckScreenPosition: CGPoint = CGPoint(x: 0, y: 0)
@@ -157,6 +165,9 @@ struct HologramMetalView: UIViewRepresentable {
             
             setupMetal()
             loadParticlesFromImages()
+
+            // Debug: Print Uniforms size for alignment verification
+            print("🔧 Swift Uniforms stride: \(MemoryLayout<Uniforms>.stride) bytes")
         }
 
         deinit {
@@ -190,6 +201,14 @@ struct HologramMetalView: UIViewRepresentable {
             dissolve = settings.hologramDissolve
             wobble = settings.hologramWobble
             yOffset = settings.hologramYPosition * 250.0 // Map -1 to +1 to -250 to +250 units (positive = up) - 2.5x higher
+            emissionDensity = settings.hologramEmissionDensity
+
+            // Map speed slider to travelTimeSec (lower time = faster)
+            // speed 0 → 8.0s (slow), speed 1 → 2.0s (fast)
+            let minT: Float = 2.0
+            let maxT: Float = 8.0
+            let speed01 = simd_clamp(settings.hologramEmissionSpeed, 0.0, 1.0)
+            travelTimeSec = maxT - speed01 * (maxT - minT)
 
             // Check for particle count changes
             let newParticleCount = Int(settings.hologramParticleCount)
@@ -314,20 +333,24 @@ struct HologramMetalView: UIViewRepresentable {
             struct Uniforms {
                 float4x4 mvpMatrix;
                 float4x4 viewMatrix;
-                float rotation;
-                float time;
-                float sizeMultiplier;
-                float zoom;
-                float depthScale;
-                float bgHide;
-                float dissolve;
-                float wobble;
-                float yOffset;
-                float3 centerPoint;
-                float2 imageDimensions;
-                float aspectRatio;
-                float3 puckWorldPosition; // Puck position for emission lifecycle
-                float _pad0;
+                float    rotation;
+                float    time;
+                float    sizeMultiplier;
+                float    zoom;
+                float    depthScale;
+                float    bgHide;
+                float    dissolve;
+                float    wobble;
+                float    yOffset;
+                float4   centerPoint;        // <- was float3
+                float2   imageDimensions;
+                float    aspectRatio;
+                float    _padA;              // pad to 16B
+                float4   puckWorldPosition;  // <- was float3
+                float    emissionDensity;
+                float    emissionPeriodSec;
+                float    travelTimeSec;
+                float    arcHeight;
             };
 
             struct VertexOut {
@@ -466,51 +489,53 @@ struct HologramMetalView: UIViewRepresentable {
                     hologramPos.z += sin(time3 * 2.3) * wobbleAmount * hash3;
                 }
 
-                // Natural fountain emission from puck to hologram
-                float emission_cycle = uniforms.time * 0.7; // Faster, more visible cycles
+                // === Target in-flight fraction model ======================================
+                // Let emissionDensity be the target fraction of particles in flight (0..0.1).
+                // Choose an effective period Peff so that steady-state fraction T/Peff == emissionDensity.
+                // We also keep a base "nominal" period P that shapes cadence.
+                const float P = max(0.001, uniforms.emissionPeriodSec);
+                const float T = max(0.001, uniforms.travelTimeSec);
 
-                // Use the random emission seed for staggered timing
-                float particle_emission_time = fmod(particle.emissionSeed * 12.0 + emission_cycle, 15.0); // 15 second cycles
+                // Clamp target fraction F to 0..0.1, then compute windowFrac = F * (P/T),
+                // and Peff = P / windowFrac. This yields T/Peff == F.
+                float F = clamp(uniforms.emissionDensity, 0.0, 0.1);
+                float windowFrac = clamp(F * (P / T), 0.0, 1.0);
+                float Peff = P / max(windowFrac, 1e-4);   // avoid div-by-zero; huge Peff when F≈0
 
-                // Only emit particles that aren't hidden by background hide
-                bool would_be_hidden = false;
-                if (uniforms.bgHide > 0.0) {
-                    float fadeStart = 1.0 - uniforms.bgHide;
-                    would_be_hidden = (normalizedDepth >= fadeStart);
-                }
+                // Stagger each particle by its seed; each particle "launches" once per Peff seconds.
+                float timeWithOffset = uniforms.time * 0.3 + particle.emissionSeed * Peff;
+                float phase = fract(timeWithOffset / Peff);   // [0,1) within this particle's Peff-cycle
 
-                // 20% of particles emitting at any time for continuous stream effect, but only if not hidden
-                bool is_emitting = (particle_emission_time < 3.0) && !would_be_hidden;
+                // Age since launch in seconds (0..Peff)
+                float ageSec = phase * Peff;
 
-                if (is_emitting) {
-                    // Natural fountain physics: particles travel from puck screen position to hologram
-                    float emission_progress = particle_emission_time / 3.0; // 0.0 = start, 1.0 = end
+                // In flight while age < T (independent of target fraction).
+                bool is_in_flight = (ageSec < T);
 
-                    // Smooth trajectory curve (ease-out for natural deceleration)
-                    float t = 1.0 - pow(1.0 - emission_progress, 2.0);
+                if (is_in_flight) {
+                    // Travel progress is based ONLY on age since launch vs T (independent of ON window)
+                    float t = clamp(ageSec / T, 0.0, 1.0);
 
-                    // Start position: puck world position
-                    float3 startPos = uniforms.puckWorldPosition;
-
-                    // End position: final hologram position
+                    // Start/end
+                    float3 startPos = uniforms.puckWorldPosition.xyz;
                     float3 endPos = hologramPos;
 
-                    // Add natural fountain arc
-                    float arc_height = sin(emission_progress * 3.14159) * 50.0;
-                    float3 arcPos = mix(startPos, endPos, t);
-                    arcPos.y += arc_height;
+                    // Ease-out
+                    float te = 1.0 - pow(1.0 - t, 2.0);
 
-                    // Gentle sway for natural motion
-                    arcPos.x += sin(emission_progress * 6.0 + particle.emissionSeed * 10.0) * 8.0;
-                    arcPos.z += cos(emission_progress * 4.0 + particle.emissionSeed * 12.0) * 5.0;
+                    // Arc + gentle sway
+                    float3 arcPos = mix(startPos, endPos, te);
+                    arcPos.y += sin(t * 3.1415926) * uniforms.arcHeight;
+                    arcPos.x += sin(t * 6.0 + particle.emissionSeed * 10.0) * 8.0;
+                    arcPos.z += cos(t * 4.0 + particle.emissionSeed * 12.0) * 5.0;
 
                     hologramPos = arcPos;
 
-                    // Keep original particle colors during fountain emission
-                    particle.size = 1.5; // Slightly larger for visibility
-                    particle.looseness = 0.0; // Foreground particles - immune to background hiding
+                    // Visible while in-flight; immune to bgHide
+                    particle.size = 1.5;
+                    particle.looseness = 0.0;
                 } else {
-                    // Normal hologram behavior
+                    // Flight complete; fall back to normal hologram behavior
                     particle.looseness = normalizedDepth;
                 }
                 particle.position = hologramPos;
@@ -986,11 +1011,15 @@ struct HologramMetalView: UIViewRepresentable {
                 dissolve: dissolve,
                 wobble: wobble,
                 yOffset: yOffset,
-                centerPoint: centerPoint,
+                centerPoint: SIMD4<Float>(centerPoint.x, centerPoint.y, centerPoint.z, 0),
                 imageDimensions: imageDimensions,
                 aspectRatio: aspect,
-                puckWorldPosition: puckWorldPos,
-                _pad0: 0
+                _padA: 0,
+                puckWorldPosition: SIMD4<Float>(puckWorldPos.x, puckWorldPos.y, puckWorldPos.z, 0),
+                emissionDensity: emissionDensity,          // now arrives correctly
+                emissionPeriodSec: emissionPeriodSec,
+                travelTimeSec: travelTimeSec,
+                arcHeight: arcHeight
             )
             uniformBuffer.contents().copyMemory(from: &uniforms, byteCount: MemoryLayout<Uniforms>.size)
             

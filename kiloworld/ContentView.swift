@@ -195,24 +195,18 @@ struct ContentView: View {
             VStack {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
+                        Text("PARTICLES: \(String(format: "%.0f", userSettings.hologramParticleCount))")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.pink)
+                        Text("EMISSION: \(String(format: "%.2f", userSettings.hologramEmissionDensity))")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.pink)
                         Text("ZOOM: \(String(format: "%.2f", actualZoom))")
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(.white)
-                        Text("PITCH: \(String(format: "%.1f", actualPitch))°")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.white)
-                        
-                        // Synthesizer status display
                         Text("SYNTH: \(activeSkyTouches) notes")
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(.cyan)
-                        
-                        Text("ENERGY: \(pathStorage.formattedDistance(pathStorage.currentDistance))")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.green)
-                        Text("JOURNEY: \(pathStorage.currentPath.count) pts")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.white)
                     }
                     .padding(8)
                     .background(Color.black.opacity(0.7))
@@ -228,22 +222,19 @@ struct ContentView: View {
             VStack {
                 HStack {
                     Spacer()
-                    Button(action: {
-                        showUserModal = true
-                    }) {
+                    Button(action: { showUserModal = true }) {
                         Image(systemName: "person.circle.fill")
-                            .font(.system(size: 36)) // 50% larger than 24
+                            .font(.system(size: 36))
                             .foregroundColor(.white)
                     }
                     .padding(12)
                     .background(Color.black.opacity(0.7))
                     .clipShape(Circle())
-                    .shadow(color: .black.opacity(0.3), radius: 3, x: 0, y: 1)
                 }
                 Spacer()
             }
-            .padding(.top, 5) // 5px below safe area
-            .padding(.trailing, 5) // 5px from right edge
+            .padding(.top, 5)
+            .padding(.trailing, 5)
             
             // Hide Mapbox logo with overlay
             VStack {

@@ -22,7 +22,7 @@ extension MapView {
             print("[map] ❌ Failed to add background: \(error)")
         }
 
-        // 2) Add stars layer using Mapbox's sky layer
+        // 2) Add stars layer using Mapbox's sky layer with fog
         var skyLayer = SkyLayer(id: "stars-sky")
         skyLayer.skyType = .constant(.atmosphere)
         skyLayer.skyAtmosphereSun = .constant([0.0, 90.0]) // Sun at zenith (creates dark sky)
@@ -34,7 +34,7 @@ extension MapView {
         } catch {
             print("[map] ❌ Failed to add stars sky layer: \(error)")
         }
-        
+
         // 3) Streets source (Mapbox Streets v8)
         var streets = VectorSource(id: "neon-streets")
         streets.url = "mapbox://mapbox.mapbox-streets-v8"
@@ -62,9 +62,9 @@ extension MapView {
             Exp(.eq) { Exp(.get) { "class" }; "service" }
         }
         
-        // White neon colors
+        // Brighter white neon colors
         let neonCore = StyleColor(UIColor(red: 1.0, green: 1.0, blue: 1.0, alpha: 1))   // pure white
-        let neonGlow = StyleColor(UIColor(red: 0.9, green: 0.9, blue: 1.0, alpha: 1))   // slightly blue-white glow
+        let neonGlow = StyleColor(UIColor(red: 1.0, green: 1.0, blue: 1.0, alpha: 1))   // pure white glow
         
         // Zoom-driven width expressions - thinner roads
         let wideByZoom: Exp = Exp(.interpolate) {
@@ -91,7 +91,7 @@ extension MapView {
         glow.sourceLayer = "road"
         glow.filter = roadFilter
         glow.lineColor = .constant(neonGlow)
-        glow.lineOpacity = .constant(0.5)
+        glow.lineOpacity = .constant(0.8)
         glow.lineWidth = .expression(wideByZoom)
         glow.lineBlur = .expression(Exp(.interpolate) {
             Exp(.linear); Exp(.zoom)

@@ -62,6 +62,14 @@ class UserSettings: ObservableObject {
     @Published var hologramParticleCount: Float = 30000.0 {
         didSet { userDefaults.set(hologramParticleCount, forKey: "hologram_particle_count") }
     }
+
+    @Published var hologramEmissionDensity: Float = 0.08 {
+        didSet { userDefaults.set(hologramEmissionDensity, forKey: "hologram_emission_density") }
+    }
+
+    @Published var hologramEmissionSpeed: Float = 0.5 {
+        didSet { userDefaults.set(hologramEmissionSpeed, forKey: "hologram_emission_speed") }
+    }
     
     // MARK: - Initialization
     
@@ -111,6 +119,12 @@ class UserSettings: ObservableObject {
         if userDefaults.object(forKey: "hologram_particle_count") != nil {
             hologramParticleCount = userDefaults.float(forKey: "hologram_particle_count")
         }
+        if userDefaults.object(forKey: "hologram_emission_density") != nil {
+            hologramEmissionDensity = userDefaults.float(forKey: "hologram_emission_density")
+        }
+        if userDefaults.object(forKey: "hologram_emission_speed") != nil {
+            hologramEmissionSpeed = userDefaults.float(forKey: "hologram_emission_speed")
+        }
         
         print("[settings] 📱 Loaded UI settings and hologram controls")
     }
@@ -130,6 +144,8 @@ class UserSettings: ObservableObject {
         hologramWobble = 0.0
         hologramYPosition = 0.0
         hologramParticleCount = 30000.0
+        hologramEmissionDensity = 0.08
+        hologramEmissionSpeed = 0.5
         print("[settings] 🔄 Reset to default settings")
     }
 }

@@ -594,6 +594,110 @@ struct UserModalView: View {
                     Spacer()
                 }
             }
+
+            // Emission Density Slider
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Emission Density")
+                        .font(.subheadline)
+                        .foregroundColor(.white)
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text("\(String(format: "%.1f", userSettings.hologramEmissionDensity * 100))%")
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .foregroundColor(.white)
+                        Text(getEmissionIndicator(userSettings.hologramEmissionDensity))
+                            .font(.system(size: 9))
+                            .foregroundColor(getEmissionColor(userSettings.hologramEmissionDensity))
+                    }
+                }
+                Slider(value: $userSettings.hologramEmissionDensity, in: 0.01...0.1, step: 0.005)
+
+                // Preset buttons for emission density
+                HStack(spacing: 8) {
+                    Button("Light (3%)") {
+                        userSettings.hologramEmissionDensity = 0.03
+                    }
+                    .font(.caption)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.cyan.opacity(0.2))
+                    .foregroundColor(.cyan)
+                    .cornerRadius(4)
+
+                    Button("Medium (6%)") {
+                        userSettings.hologramEmissionDensity = 0.06
+                    }
+                    .font(.caption)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.blue.opacity(0.2))
+                    .foregroundColor(.blue)
+                    .cornerRadius(4)
+
+                    Button("Dense (10%)") {
+                        userSettings.hologramEmissionDensity = 0.1
+                    }
+                    .font(.caption)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.purple.opacity(0.2))
+                    .foregroundColor(.purple)
+                    .cornerRadius(4)
+
+                    Spacer()
+                }
+            }
+
+            // Emission Speed Slider
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Emission Speed")
+                        .font(.subheadline)
+                        .foregroundColor(.white)
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(getSpeedLabel(userSettings.hologramEmissionSpeed))
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .foregroundColor(.white)
+                        Text(getSpeedIndicator(userSettings.hologramEmissionSpeed))
+                            .font(.system(size: 9))
+                            .foregroundColor(getSpeedColor(userSettings.hologramEmissionSpeed))
+                    }
+                }
+                Slider(value: $userSettings.hologramEmissionSpeed, in: 0.0...1.0, step: 0.05)
+
+                // Preset buttons for emission speed
+                HStack(spacing: 8) {
+                    Button("Slow") { userSettings.hologramEmissionSpeed = 0.2 }
+                        .font(.caption)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.orange.opacity(0.2))
+                        .foregroundColor(.orange)
+                        .cornerRadius(4)
+
+                    Button("Medium") { userSettings.hologramEmissionSpeed = 0.5 }
+                        .font(.caption)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.blue.opacity(0.2))
+                        .foregroundColor(.blue)
+                        .cornerRadius(4)
+
+                    Button("Fast") { userSettings.hologramEmissionSpeed = 0.8 }
+                        .font(.caption)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.green.opacity(0.2))
+                        .foregroundColor(.green)
+                        .cornerRadius(4)
+
+                    Spacer()
+                }
+            }
         }
         .padding()
         .background(Color.black.opacity(0.2))
@@ -641,6 +745,64 @@ struct UserModalView: View {
             return .orange
         default:
             return .red
+        }
+    }
+
+    // Emission density helpers (updated for 0.01-0.1 range)
+    private func getEmissionIndicator(_ density: Float) -> String {
+        switch density {
+        case 0...0.03:
+            return "Sparse"
+        case 0.031...0.06:
+            return "Moderate"
+        case 0.061...0.08:
+            return "Dense"
+        default:
+            return "Maximum"
+        }
+    }
+
+    private func getEmissionColor(_ density: Float) -> Color {
+        switch density {
+        case 0...0.03:
+            return .cyan
+        case 0.031...0.06:
+            return .blue
+        case 0.061...0.08:
+            return .purple
+        default:
+            return .pink
+        }
+    }
+
+    // Emission speed helpers
+    private func getSpeedLabel(_ speed: Float) -> String {
+        // Convert to travel time: speed 0 → 8.0s, speed 1 → 2.0s
+        let minT: Float = 2.0
+        let maxT: Float = 8.0
+        let travelTime = maxT - speed * (maxT - minT)
+        return String(format: "%.1fs", travelTime)
+    }
+
+    private func getSpeedIndicator(_ speed: Float) -> String {
+        switch speed {
+        case 0...0.3:
+            return "Slow"
+        case 0.301...0.7:
+            return "Medium"
+        default:
+            return "Fast"
+        }
+    }
+
+    private func getSpeedColor(_ speed: Float) -> Color {
+        switch speed {
+        case 0...0.3:
+            return .orange
+        case 0.301...0.7:
+            return .blue
+        default:
+            return .green
         }
     }
 }
