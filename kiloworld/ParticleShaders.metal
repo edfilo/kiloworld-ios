@@ -31,6 +31,9 @@ struct ParticleParams {
     float userScale;        // User zoom level
     float userRotationY;    // User Y rotation (horizontal drag)
     float userRotationX;    // User X rotation (vertical drag)
+    float particleBlink;    // Blink rate: 0=no blink, 1=random blink 0.5-5.0s
+    float particleRandomSize; // Size variation: 0=uniform, 1=varied
+    float particleGlow;     // Glow effect: 0=sharp circles, 1=soft glow
 };
 
 // Hash function for stable per-particle randomness
@@ -350,6 +353,7 @@ struct ParticleVertexOut {
     float released; // Add released state to pass to fragment shader
     float depth; // Add depth value for debugging
     float instanceID; // Pass instanceID for debugging
+    float glowAmount; // Glow effect amount
 };
 
 // Vertex shader for particle rendering with instanced quads
@@ -542,8 +546,26 @@ vertex ParticleVertexOut particleVertex(
     float2 quadOffset = quadOffsets[vertexID];
     float pixelToWorldScale = 0.001; // Base scale for pixel sizes
     
-    // Apply global size multiplier, then enforce minimum 1 pixel
-    float scaledSize = baseStarSize * params.globalSize;
+    // Apply random size variation
+    float sizeVariation = 1.0;
+    if (params.particleRandomSize > 0.0) {
+        // Random size between 0.5x and 1.5x natural size
+        float randomSizeFactor = 0.5 + particleRandom3 * 1.0; // 0.5 to 1.5
+        sizeVariation = mix(1.0, randomSizeFactor, params.particleRandomSize);
+    }
+
+    // Apply blink effect
+    float blinkAlpha = 1.0;
+    if (params.particleBlink > 0.0) {
+        // Random blink period between 0.5 and 5.0 seconds per particle
+        float blinkPeriod = 0.5 + particleRandom1 * 4.5; // 0.5 to 5.0 seconds
+        float blinkPhase = fmod(params.time + particleRandom2 * 10.0, blinkPeriod) / blinkPeriod;
+        float blinkPattern = smoothstep(0.0, 0.1, blinkPhase) * (1.0 - smoothstep(0.9, 1.0, blinkPhase));
+        blinkAlpha = mix(1.0, blinkPattern, params.particleBlink);
+    }
+
+    // Apply global size multiplier, size variation, and enforce minimum 1 pixel
+    float scaledSize = baseStarSize * params.globalSize * sizeVariation;
     float finalSize = max(scaledSize, 1.0); // Minimum 1 pixel after scaling
     float particleScale = finalSize * pixelToWorldScale;
     
@@ -557,15 +579,16 @@ vertex ParticleVertexOut particleVertex(
     
     // Make sure particles are visible during hold period
     if (released == 0.0) {
-        out.alpha = 1.0; // Fully visible during hold
+        out.alpha = 1.0 * blinkAlpha; // Apply blink during hold
     } else if (age > params.life) {
         out.position = float4(-2, -2, -2, 1); // Clip old particles
         out.alpha = 0.0;
         return out;
     }
-    
-    out.alpha = 1.0;
-    
+
+    out.alpha = ageAlpha * blinkAlpha; // Apply both age fade and blink
+    out.glowAmount = params.particleGlow; // Pass glow amount to fragment shader
+
     return out;
 }
 
@@ -600,88 +623,114 @@ fragment float4 particleFragment(
     float circleAlpha = 1.0;
     
     if (in.size < 8.0) {
-        // Small specs - simple circular with soft glow
-        float coreRadius = 0.2; // Larger bright core
+        // Small specs - adjustable glow based on slider
+        float sharpRadius = 0.4; // Sharp circle radius
+        float coreRadius = 0.2; // Larger bright core for glow
         float glowRadius = 0.5;  // Fill most of the quad
-        
-        if (dist <= coreRadius) {
-            circleAlpha = 1.0; // Bright center
-        } else if (dist <= glowRadius) {
-            // Smooth falloff for glow
-            float falloff = (glowRadius - dist) / (glowRadius - coreRadius);
-            circleAlpha = falloff * falloff * 0.8; // Squared falloff with dimming
+
+        if (in.glowAmount == 0.0) {
+            // Sharp circle mode
+            circleAlpha = dist <= sharpRadius ? 1.0 : 0.0;
         } else {
-            circleAlpha = 0.0;
+            // Glow mode
+            if (dist <= coreRadius) {
+                circleAlpha = 1.0; // Bright center
+            } else if (dist <= glowRadius) {
+                // Smooth falloff for glow
+                float falloff = (glowRadius - dist) / (glowRadius - coreRadius);
+                float glowIntensity = mix(0.0, 0.8, in.glowAmount);
+                circleAlpha = falloff * falloff * glowIntensity;
+            } else {
+                circleAlpha = 0.0;
+            }
         }
         
     } else if (in.size < 20.0) {
-        // Medium stars - varied shapes with glow
+        // Medium stars - adjustable glow based on slider
+        float sharpRadius = 0.35;
         float coreRadius = 0.15;
         float glowRadius = 0.5; // Fill the quad
-        
-        if (particleShapeRandom < 0.3) {
-            // Cross/plus shape for some medium stars
-            float2 centeredUV = uv - center;
-            bool inCross = (abs(centeredUV.x) < 0.08 && abs(centeredUV.y) < 0.3) || 
-                          (abs(centeredUV.y) < 0.08 && abs(centeredUV.x) < 0.3);
-            if (inCross) {
-                circleAlpha = dist < coreRadius ? 1.0 : (1.0 - smoothstep(0.1, glowRadius, dist)) * 0.7;
-            } else {
-                circleAlpha = 0.0;
-            }
+
+        if (in.glowAmount == 0.0) {
+            // Sharp circle mode
+            circleAlpha = dist <= sharpRadius ? 1.0 : 0.0;
         } else {
-            // Regular circular with enhanced glow
-            if (dist <= coreRadius) {
-                circleAlpha = 1.0;
-            } else if (dist <= glowRadius) {
-                float falloff = (glowRadius - dist) / (glowRadius - coreRadius);
-                circleAlpha = falloff * falloff * 0.6;
+            // Glow mode with original complex shapes
+            if (particleShapeRandom < 0.3) {
+                // Cross/plus shape for some medium stars
+                float2 centeredUV = uv - center;
+                bool inCross = (abs(centeredUV.x) < 0.08 && abs(centeredUV.y) < 0.3) ||
+                              (abs(centeredUV.y) < 0.08 && abs(centeredUV.x) < 0.3);
+                if (inCross) {
+                    float glowIntensity = mix(0.0, 0.7, in.glowAmount);
+                    circleAlpha = dist < coreRadius ? 1.0 : (1.0 - smoothstep(0.1, glowRadius, dist)) * glowIntensity;
+                } else {
+                    circleAlpha = 0.0;
+                }
             } else {
-                circleAlpha = 0.0;
+                // Regular circular with enhanced glow
+                if (dist <= coreRadius) {
+                    circleAlpha = 1.0;
+                } else if (dist <= glowRadius) {
+                    float falloff = (glowRadius - dist) / (glowRadius - coreRadius);
+                    float glowIntensity = mix(0.0, 0.6, in.glowAmount);
+                    circleAlpha = falloff * falloff * glowIntensity;
+                } else {
+                    circleAlpha = 0.0;
+                }
             }
         }
     } else {
-        // Large stellar objects - complex shapes with extended glow
+        // Large stellar objects - adjustable glow based on slider
+        float sharpRadius = 0.3;
         float coreRadius = 0.1;
         float glowRadius = 0.5; // Fill entire quad
-        
-        if (particleShapeRandom < 0.2) {
-            // Organic oval/elliptical specs - more natural looking
-            float2 centeredUV = uv - center;
-            
-            // Create slightly elongated shapes with random orientation
-            float elongation = 1.3 + particleShapeRandom * 0.4; // 1.3-1.7x elongation
-            float rotationAngle = particleShapeRandom * 6.28; // Random rotation
-            
-            // Rotate coordinates
-            float cosRot = cos(rotationAngle);
-            float sinRot = sin(rotationAngle);
-            float2 rotatedUV = float2(
-                centeredUV.x * cosRot - centeredUV.y * sinRot,
-                centeredUV.x * sinRot + centeredUV.y * cosRot
-            );
-            
-            // Apply elongation to create oval shape
-            rotatedUV.x *= elongation;
-            float ovalDist = length(rotatedUV);
-            
-            if (ovalDist <= coreRadius * 2.5) {
-                circleAlpha = 1.0; // Bright core
-            } else if (ovalDist <= glowRadius * 0.9) {
-                float falloff = (glowRadius * 0.9 - ovalDist) / (glowRadius * 0.9 - coreRadius * 2.5);
-                circleAlpha = falloff * falloff * 0.6; // Soft glow
-            } else {
-                circleAlpha = 0.0;
-            }
+
+        if (in.glowAmount == 0.0) {
+            // Sharp circle mode
+            circleAlpha = dist <= sharpRadius ? 1.0 : 0.0;
         } else {
-            // Large circular with extensive glow field
-            if (dist <= coreRadius) {
-                circleAlpha = 1.0; // Bright core
-            } else if (dist <= glowRadius) {
-                float falloff = (glowRadius - dist) / (glowRadius - coreRadius);
-                circleAlpha = falloff * falloff * falloff * 0.4; // Cubic falloff for extended glow
+            // Glow mode with complex shapes
+            if (particleShapeRandom < 0.2) {
+                // Organic oval/elliptical specs - more natural looking
+                float2 centeredUV = uv - center;
+
+                // Create slightly elongated shapes with random orientation
+                float elongation = 1.3 + particleShapeRandom * 0.4; // 1.3-1.7x elongation
+                float rotationAngle = particleShapeRandom * 6.28; // Random rotation
+
+                // Rotate coordinates
+                float cosRot = cos(rotationAngle);
+                float sinRot = sin(rotationAngle);
+                float2 rotatedUV = float2(
+                    centeredUV.x * cosRot - centeredUV.y * sinRot,
+                    centeredUV.x * sinRot + centeredUV.y * cosRot
+                );
+
+                // Apply elongation to create oval shape
+                rotatedUV.x *= elongation;
+                float ovalDist = length(rotatedUV);
+
+                if (ovalDist <= coreRadius * 2.5) {
+                    circleAlpha = 1.0; // Bright core
+                } else if (ovalDist <= glowRadius * 0.9) {
+                    float falloff = (glowRadius * 0.9 - ovalDist) / (glowRadius * 0.9 - coreRadius * 2.5);
+                    float glowIntensity = mix(0.0, 0.6, in.glowAmount);
+                    circleAlpha = falloff * falloff * glowIntensity;
+                } else {
+                    circleAlpha = 0.0;
+                }
             } else {
-                circleAlpha = 0.0;
+                // Large circular with extensive glow field
+                if (dist <= coreRadius) {
+                    circleAlpha = 1.0; // Bright core
+                } else if (dist <= glowRadius) {
+                    float falloff = (glowRadius - dist) / (glowRadius - coreRadius);
+                    float glowIntensity = mix(0.0, 0.4, in.glowAmount);
+                    circleAlpha = falloff * falloff * falloff * glowIntensity;
+                } else {
+                    circleAlpha = 0.0;
+                }
             }
         }
     }

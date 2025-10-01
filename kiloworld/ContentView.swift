@@ -13,7 +13,68 @@ import FirebaseDatabase
 import MapboxMaps
 import Turf
 import CoreLocation
+
+// Codable version of ChatMessage for persistence
+struct ChatMessageData: Codable {
+    let role: String
+    let content: String
+}
 import os
+
+// 80s Digital Display DateFormatters
+extension DateFormatter {
+    static let digitalDate: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM/dd/yy"
+        return formatter
+    }()
+
+    static let digitalTime: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
+}
+
+// Major world cities for nearest city calculation
+struct WorldCity {
+    let name: String
+    let country: String
+    let coordinate: CLLocationCoordinate2D
+}
+
+let majorCities: [WorldCity] = [
+    WorldCity(name: "new york", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 40.7128, longitude: -74.0060)),
+    WorldCity(name: "los angeles", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 34.0522, longitude: -118.2437)),
+    WorldCity(name: "chicago", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 41.8781, longitude: -87.6298)),
+    WorldCity(name: "houston", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 29.7604, longitude: -95.3698)),
+    WorldCity(name: "phoenix", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 33.4484, longitude: -112.0740)),
+    WorldCity(name: "philadelphia", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 39.9526, longitude: -75.1652)),
+    WorldCity(name: "san antonio", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 29.4241, longitude: -98.4936)),
+    WorldCity(name: "san diego", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 32.7157, longitude: -117.1611)),
+    WorldCity(name: "dallas", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 32.7767, longitude: -96.7970)),
+    WorldCity(name: "san jose", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 37.3382, longitude: -121.8863)),
+    WorldCity(name: "austin", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 30.2672, longitude: -97.7431)),
+    WorldCity(name: "jacksonville", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 30.3322, longitude: -81.6557)),
+    WorldCity(name: "fort worth", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 32.7555, longitude: -97.3308)),
+    WorldCity(name: "columbus", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 39.9612, longitude: -82.9988)),
+    WorldCity(name: "san francisco", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194)),
+    WorldCity(name: "charlotte", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 35.2271, longitude: -80.8431)),
+    WorldCity(name: "indianapolis", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 39.7684, longitude: -86.1581)),
+    WorldCity(name: "seattle", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 47.6062, longitude: -122.3321)),
+    WorldCity(name: "denver", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 39.7392, longitude: -104.9903)),
+    WorldCity(name: "washington dc", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 38.9072, longitude: -77.0369)),
+    WorldCity(name: "boston", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 42.3601, longitude: -71.0589)),
+    WorldCity(name: "nashville", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 36.1627, longitude: -86.7816)),
+    WorldCity(name: "pittsburgh", country: "usa", coordinate: CLLocationCoordinate2D(latitude: 40.4406, longitude: -79.9959)),
+    WorldCity(name: "london", country: "uk", coordinate: CLLocationCoordinate2D(latitude: 51.5074, longitude: -0.1278)),
+    WorldCity(name: "paris", country: "france", coordinate: CLLocationCoordinate2D(latitude: 48.8566, longitude: 2.3522)),
+    WorldCity(name: "tokyo", country: "japan", coordinate: CLLocationCoordinate2D(latitude: 35.6762, longitude: 139.6503)),
+    WorldCity(name: "berlin", country: "germany", coordinate: CLLocationCoordinate2D(latitude: 52.5200, longitude: 13.4050)),
+    WorldCity(name: "sydney", country: "australia", coordinate: CLLocationCoordinate2D(latitude: -33.8688, longitude: 151.2093)),
+    WorldCity(name: "toronto", country: "canada", coordinate: CLLocationCoordinate2D(latitude: 43.6510, longitude: -79.3470)),
+    WorldCity(name: "dubai", country: "uae", coordinate: CLLocationCoordinate2D(latitude: 25.2048, longitude: 55.2708))
+]
 
 struct ContentView: View {
     @State private var messageText = ""
@@ -48,6 +109,9 @@ struct ContentView: View {
     
     // User modal state
     @State private var showUserModal: Bool = false
+
+    // Settings modal state
+    @State private var showSettingsModal: Bool = false
     
     // Location manager
     @StateObject private var locationManager = LocationManager()
@@ -86,8 +150,14 @@ struct ContentView: View {
     @State private var defaultZoom: Double = UserDefaults.standard.double(forKey: "defaultZoom") != 0 ? UserDefaults.standard.double(forKey: "defaultZoom") : 16.0
     
     // Reference to map coordinator for animations
-    @State private var mapCoordinator: NeonGridMapView.Coordinator?
-    
+    @State private var mapCoordinator: CustomMapView.Coordinator?
+    @State private var globeOn = false
+
+    // Live clock for debug display
+    @State private var currentTime = Date()
+    @State private var clockTimer: Timer?
+    @State private var nearestCityText = "FINDING CITY..."
+
     // Reference to hologram coordinator for SkyGate control
     @State private var hologramCoordinator: HologramMetalView.HologramCoordinator?
     
@@ -103,6 +173,9 @@ struct ContentView: View {
         }
         return nil
     }()
+
+    // Layer audio engine for looping audio files from URLs
+    @StateObject private var layerAudioEngine = LayerAudioEngine()
     
     private var database = Database.database().reference()
     
@@ -131,7 +204,7 @@ struct ContentView: View {
     
     // Neon Grid MapView using UIKit approach
     private var mapboxMapView: some View {
-        NeonGridMapView(
+        CustomMapView(
             viewport: $viewport,
             allowViewportUpdate: allowViewportUpdate,
             userPath: pathStorage.currentPath,
@@ -147,6 +220,9 @@ struct ContentView: View {
                 if let mapCoordinator = mapCoordinator,
                    let puckPosition = mapCoordinator.getPuckScreenPosition() {
                     puckScreenPosition = puckPosition
+                    print("[puck] 📍 Updated puck position: \(puckPosition) (mode: \(mapCoordinator.mode == .globe ? "globe" : "neon"))")
+                } else {
+                    print("[puck] ⚠️ Failed to get puck position from map coordinator")
                 }
                 
                 // IMPORTANT: Update viewport to match actual camera to prevent snap-back
@@ -181,7 +257,8 @@ struct ContentView: View {
             dynamicTopPadding: dynamicTopPadding,
             dynamicBottomPadding: dynamicBottomPadding,
             defaultPitch: defaultPitch,
-            defaultZoom: defaultZoom
+            defaultZoom: defaultZoom,
+            userSettings: userSettings
         )
     }
     
@@ -190,11 +267,31 @@ struct ContentView: View {
             // Map layer
             mapboxMapView
                 .ignoresSafeArea()
+                .onChange(of: [userSettings.horizonWidth, userSettings.horizonStart, userSettings.horizonFeather]) { _, newValues in
+                    // Re-apply neon grid style when any horizon setting changes
+                    print("[map] 🔄 Horizon settings changed: width=\(newValues[0]), start=\(newValues[1]), feather=\(newValues[2])")
+                    if let mapCoordinator = mapCoordinator {
+                        mapCoordinator.reapplyNeonGridStyle(with: userSettings)
+                    }
+                }
             
             // Debug overlay and controls
             VStack {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
+                        // Live date/time on same line in retro digital font
+                        Text("\(DateFormatter.digitalDate.string(from: currentTime)) \(DateFormatter.digitalTime.string(from: currentTime))")
+                            .font(.custom("Courier New", size: 14))
+                            .fontWeight(.bold)
+                            .foregroundColor(.green)
+                        Text("STEPS TAKEN: \(pathStorage.currentPath.count)")
+                            .font(.custom("Courier New", size: 14))
+                            .fontWeight(.bold)
+                            .foregroundColor(.green)
+                        Text(nearestCityText)
+                            .font(.custom("Courier New", size: 14))
+                            .fontWeight(.bold)
+                            .foregroundColor(.green)
                         Text("PARTICLES: \(String(format: "%.0f", userSettings.hologramParticleCount))")
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(.pink)
@@ -204,9 +301,15 @@ struct ContentView: View {
                         Text("ZOOM: \(String(format: "%.2f", actualZoom))")
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(.white)
+                        Text("PITCH: \(String(format: "%.1f", actualPitch))°")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.white)
                         Text("SYNTH: \(activeSkyTouches) notes")
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(.cyan)
+                        Text("AUDIO LAYERS: \(layerAudioEngine.activeLayerCount)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.yellow)
                     }
                     .padding(8)
                     .background(Color.black.opacity(0.7))
@@ -218,23 +321,59 @@ struct ContentView: View {
             }
             .padding(.leading, 12)
             
-            // User icon button - positioned independently at top right
+            // Top button row - flush to safe area top
             VStack {
-                HStack {
+                HStack(spacing: 5) { // 5px spacing between buttons
                     Spacer()
+
+                    // Globe toggle button
+                    Button {
+                        globeOn.toggle()
+                        mapCoordinator?.toggleElectrifiedGlobe(userLocation: locationManager.currentLocation?.coordinate)
+                        // Update hologram globe mode to pause rotation
+                        hologramCoordinator?.setGlobeMode(globeOn)
+
+                        // Force update puck position after mode change to prevent disappearing
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                            if let coordinator = mapCoordinator,
+                               let puckPosition = coordinator.getPuckScreenPosition() {
+                                puckScreenPosition = puckPosition
+                                print("[puck] 🔄 Force updated puck position after mode change: \(puckPosition)")
+                            }
+                        }
+                    } label: {
+                        Image(systemName: globeOn ? "globe.europe.africa.fill" : "globe")
+                            .font(.system(size: 36))
+                            .foregroundColor(.white)
+                    }
+                    .frame(width: 60, height: 60)
+                    .background(Color.black.opacity(0.7))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                    // Settings button
+                    Button(action: { showSettingsModal = true }) {
+                        Image(systemName: "gearshape.fill")
+                            .font(.system(size: 36))
+                            .foregroundColor(.white)
+                    }
+                    .frame(width: 60, height: 60)
+                    .background(Color.black.opacity(0.7))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                    // User button
                     Button(action: { showUserModal = true }) {
                         Image(systemName: "person.circle.fill")
                             .font(.system(size: 36))
                             .foregroundColor(.white)
                     }
-                    .padding(12)
+                    .frame(width: 60, height: 60)
                     .background(Color.black.opacity(0.7))
-                    .clipShape(Circle())
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
                 }
+                .padding(.trailing, 5) // Right margin only
+
                 Spacer()
             }
-            .padding(.top, 5)
-            .padding(.trailing, 5)
             
             // Hide Mapbox logo with overlay
             VStack {
@@ -252,21 +391,33 @@ struct ContentView: View {
             
             // Gradient mask that fades map from transparent to black at bottom
             VStack(spacing: 0) {
-                Spacer()
-                
-                // Gradient overlay that masks map behind chat area and extends to screen bottom
+                // 20px roads fade out from top
                 LinearGradient(
                     gradient: Gradient(stops: [
-                        .init(color: .clear, location: 0.0),          // Fully transparent at top
-                        .init(color: .clear, location: 0.3),          // Stay transparent
-                        .init(color: .black.opacity(0.1), location: 0.5), // Start fading
-                        .init(color: .black.opacity(0.4), location: 0.7), // More opacity
-                        .init(color: .black.opacity(0.8), location: 0.9), // Almost opaque
-                        .init(color: .black, location: 1.0)           // Fully opaque at bottom
+                        .init(color: .black, location: 0.0),           // Fully black at top
+                        .init(color: .black.opacity(0.5), location: 0.7), // Start fading
+                        .init(color: .clear, location: 1.0)            // Transparent at bottom of 20px
                     ]),
                     startPoint: .top,
                     endPoint: .bottom
                 )
+                .frame(height: 20) // Fixed 20px height
+                .allowsHitTesting(false) // Don't intercept touches
+
+                Spacer()
+
+                // 100px black gradient from bottom (ignoring safe area)
+                LinearGradient(
+                    gradient: Gradient(stops: [
+                        .init(color: .clear, location: 0.0),          // Transparent at top of 100px
+                        .init(color: .black.opacity(0.3), location: 0.5), // Start fading
+                        .init(color: .black.opacity(0.8), location: 0.8), // More opacity
+                        .init(color: .black, location: 1.0)           // Fully black at bottom
+                    ]),
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 100) // Fixed 100px height
                 .allowsHitTesting(false) // Don't intercept touches
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity) // Fill entire screen
@@ -286,6 +437,10 @@ struct ContentView: View {
                     sessionXid: $sessionXid,
                     currentXid: $currentXid,
                     generatedImages: $generatedImages,
+                    stepCount: pathStorage.currentPath.count,
+                    nearestCity: nearestCityText,
+                    currentLocation: locationManager.currentLocation != nil ?
+                        "\(locationManager.currentLocation!.coordinate.latitude),\(locationManager.currentLocation!.coordinate.longitude)" : nil,
                     onLocationTapped: {
                         print("[map] 📍 ZOOM TO CURRENT LOCATION")
                         zoomToUserLocation()
@@ -295,7 +450,6 @@ struct ContentView: View {
                         print("[typewriter] 📨 Latest AI message updated: \"\(String(message.prefix(50)))...\"")
                     }
                 )
-                .frame(height: chatMessages.isEmpty ? 75 : 250) // Compact when empty
                 .padding(.horizontal, 5) // 5px from left/right safe areas
                 .padding(.bottom, 5) // 5px from bottom safe area
             }
@@ -307,9 +461,9 @@ struct ContentView: View {
             )
             .allowsHitTesting(false) // Don't block map touches
             
-            // Typewriter message display in the sky
-            TypewriterMessageView(latestMessage: latestAIMessage)
-            .allowsHitTesting(false) // Don't block map touches
+            // Typewriter message display in the sky - TEMPORARILY HIDDEN
+            // TypewriterMessageView(latestMessage: latestAIMessage)
+            // .allowsHitTesting(false) // Don't block map touches
             
             // Hologram Metal view - always visible, no touch blocking
             HologramMetalView(
@@ -325,7 +479,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showUserModal) {
             UserModalView(
-                pathStorage: pathStorage, 
+                pathStorage: pathStorage,
                 mapCoordinator: mapCoordinator,
                 userLocation: locationManager.currentLocation?.coordinate,
                 dynamicTopPadding: $dynamicTopPadding,
@@ -336,7 +490,21 @@ struct ContentView: View {
                 depthAmount: $depthAmount,
                 userSettings: userSettings,
                 generatedImages: $generatedImages,
-                sessionXid: $sessionXid
+                sessionXid: $sessionXid,
+                onSessionClear: clearSessionData
+            )
+        }
+        .sheet(isPresented: $showSettingsModal) {
+            SettingsModalView(
+                userSettings: userSettings,
+                dynamicTopPadding: $dynamicTopPadding,
+                dynamicBottomPadding: $dynamicBottomPadding,
+                defaultPitch: $defaultPitch,
+                defaultZoom: $defaultZoom,
+                mapCoordinator: mapCoordinator,
+                userLocation: locationManager.currentLocation?.coordinate,
+                generatedImages: $generatedImages,
+                currentXid: $currentXid
             )
         }
         .onAppear {
@@ -354,7 +522,30 @@ struct ContentView: View {
             
             // MetalWavetableSynth is now created early during initialization
             print("🔧 MetalWavetableSynth status: \(metalSynth != nil ? "✅ Available" : "❌ Failed")")
-            
+
+            // Initialize synth ADSR from user settings
+            if let synth = metalSynth {
+                print("[audio] 🎛️ Initializing synth ADSR from settings: A=\(userSettings.synthAttack) D=\(userSettings.synthDecay) S=\(userSettings.synthSustain) R=\(userSettings.synthRelease)")
+                synth.updateADSR(
+                    attack: userSettings.synthAttack,
+                    decay: userSettings.synthDecay,
+                    sustain: userSettings.synthSustain,
+                    release: userSettings.synthRelease
+                )
+                print("[audio] 🎛️ Initialized synth with ADSR from settings")
+
+                // Also apply ADSR after a short delay to ensure it sticks
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    synth.updateADSR(
+                        attack: userSettings.synthAttack,
+                        decay: userSettings.synthDecay,
+                        sustain: userSettings.synthSustain,
+                        release: userSettings.synthRelease
+                    )
+                    print("[audio] 🎛️ Re-applied synth ADSR after delay")
+                }
+            }
+
             // Connect storage to location manager
             locationManager.pathStorage = pathStorage
             
@@ -369,24 +560,30 @@ struct ContentView: View {
                 updateMapBearingFromCompass(heading)
             }
             
-            // Set up location updates for auto-centering timer
+            // Set up location updates for auto-centering timer and city distance
             locationManager.onLocationUpdate = { coordinate in
                 checkAutoCenterTimer(userLocation: coordinate)
+                updateNearestCity(coordinate)
             }
             
-            // Start the auto-center timer
-            startAutoCenterTimer()
+            // Auto-center timer disabled per user request
+            // startAutoCenterTimer()
             
             setupAlwaysOnPathTracking()
             
-            // Add initial journey message to chat
+            // Restore session data first
+            restoreSessionData()
+
+            // Add initial journey message only if no session was restored
             if chatMessages.isEmpty {
-                chatMessages.append(ChatMessage(role: "assistant", content: "welcome to the kiloverse! what sparks your curiosity?"))
+                chatMessages.append(ChatMessage(role: "assistant", content: "🌟 walk forth, create wonder ✨ what calls to your spirit? 🚶‍♂️💫"))
             }
             
             // Try to start at user location if available
             if let userLocation = locationManager.currentLocation {
                 print("[map] 📍 Starting at user location using anchor-based positioning")
+                // Update nearest city initially
+                updateNearestCity(userLocation.coordinate)
                 // Wait for coordinator to be available, then use anchor-based positioning
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     if let coordinator = mapCoordinator {
@@ -400,12 +597,19 @@ struct ContentView: View {
                     }
                 }
             }
+
+            // Start live clock timer for debug display
+            clockTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+                currentTime = Date()
+            }
         }
         .onDisappear {
-            // Clean up timer
+            // Clean up timers
             autoCenterTimer?.invalidate()
             autoCenterTimer = nil
-            print("[map] 🗑️ Cleaned up auto-center timer")
+            clockTimer?.invalidate()
+            clockTimer = nil
+            print("[map] 🗑️ Cleaned up timers")
         }
         .onChange(of: currentXid) { oldValue, newValue in
             if let xid = newValue {
@@ -451,8 +655,127 @@ struct ContentView: View {
             UserDefaults.standard.set(newValue, forKey: "depthAmount")
             print("[settings] 🏔️ Saved depthAmount: \(String(format: "%.2f", newValue))")
         }
+        .onChange(of: [userSettings.synthAttack, userSettings.synthDecay, userSettings.synthSustain, userSettings.synthRelease]) { _, newValues in
+            // Update synth ADSR when settings change
+            metalSynth?.updateADSR(
+                attack: newValues[0],
+                decay: newValues[1],
+                sustain: newValues[2],
+                release: newValues[3]
+            )
+            print("[settings] 🎛️ Updated synth ADSR from settings")
+        }
+        .onChange(of: chatMessages) { _, _ in
+            // Save session when chat messages change
+            saveSessionData()
+        }
+        .onChange(of: generatedImages) { oldValue, newValue in
+            // Save session when generated images change
+            saveSessionData()
+
+            // Load new images into hologram (with final safety check)
+            if let latestImageURL = newValue.last, !oldValue.contains(latestImageURL) {
+                // Final safety check - ensure it's actually an image file
+                let isImageFile = latestImageURL.hasSuffix(".jpg") || latestImageURL.hasSuffix(".jpeg") ||
+                                latestImageURL.hasSuffix(".png") || latestImageURL.hasSuffix(".gif") ||
+                                latestImageURL.hasSuffix(".webp") || latestImageURL.hasSuffix(".bmp") ||
+                                latestImageURL.hasSuffix(".tiff") || latestImageURL.hasSuffix(".svg")
+
+                if isImageFile {
+                    print("[hologram] 🆕 New image detected: \(latestImageURL)")
+                    hologramCoordinator?.loadHologramFromURL(latestImageURL)
+                } else {
+                    print("[hologram] 🚫 Blocked non-image file from hologram: \(latestImageURL)")
+                    print("[hologram]    → This should not happen - check layer processing logic")
+
+                    // Remove the non-image URL from generatedImages to prevent future issues
+                    if let index = generatedImages.firstIndex(of: latestImageURL) {
+                        generatedImages.remove(at: index)
+                        print("[hologram] 🧹 Cleaned up non-image URL from generatedImages")
+                    }
+                }
+            }
+        }
+        .onChange(of: sessionXid) { _, _ in
+            // Save session when session ID changes
+            saveSessionData()
+        }
+        .onChange(of: currentXid) { _, _ in
+            // Save session when current XID changes
+            saveSessionData()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
+            // Save session when app goes to background
+            saveSessionData()
+            print("[session] 💾 Saved session data on app background")
+        }
     }
-    
+
+    // MARK: - Session Persistence
+
+    private func saveSessionData() {
+        // Save chat messages
+        if let chatData = try? JSONEncoder().encode(chatMessages.map { ChatMessageData(role: $0.role, content: $0.content) }) {
+            UserDefaults.standard.set(chatData, forKey: "persistentChatMessages")
+        }
+
+        // Save session IDs
+        UserDefaults.standard.set(sessionXid, forKey: "persistentSessionXid")
+        UserDefaults.standard.set(currentXid, forKey: "persistentCurrentXid")
+
+        // Save generated images
+        UserDefaults.standard.set(generatedImages, forKey: "persistentGeneratedImages")
+
+        print("[session] 💾 Saved session data: \(chatMessages.count) messages, sessionXid: \(sessionXid ?? "nil"), currentXid: \(currentXid ?? "nil"), \(generatedImages.count) images")
+    }
+
+    private func restoreSessionData() {
+        // Restore chat messages
+        if let chatData = UserDefaults.standard.data(forKey: "persistentChatMessages"),
+           let chatDataArray = try? JSONDecoder().decode([ChatMessageData].self, from: chatData) {
+            chatMessages = chatDataArray.map { ChatMessage(role: $0.role, content: $0.content) }
+            print("[session] 📱 Restored \(chatMessages.count) chat messages")
+        }
+
+        // Restore session IDs
+        sessionXid = UserDefaults.standard.string(forKey: "persistentSessionXid")
+        currentXid = UserDefaults.standard.string(forKey: "persistentCurrentXid")
+
+        // Restore generated images
+        let restoredImages = UserDefaults.standard.stringArray(forKey: "persistentGeneratedImages") ?? []
+
+        // Filter out any audio/music URLs that might have been incorrectly saved
+        generatedImages = restoredImages.filter { url in
+            let isAudioFile = url.hasSuffix(".mp3") || url.hasSuffix(".wav") || url.hasSuffix(".m4a") || url.hasSuffix(".aac") || url.hasSuffix(".flac") || url.hasSuffix(".ogg")
+            if isAudioFile {
+                print("[session] 🎵 Filtered out audio/music URL from restored images: \(url)")
+                return false
+            }
+            return true
+        }
+
+        print("[session] 📱 Restored session data: sessionXid: \(sessionXid ?? "nil"), currentXid: \(currentXid ?? "nil"), \(generatedImages.count) images (filtered \(restoredImages.count - generatedImages.count) audio URLs)")
+    }
+
+    private func clearSessionData() {
+        // Clear in-memory data
+        chatMessages.removeAll()
+        generatedImages.removeAll()
+        sessionXid = nil
+        currentXid = nil
+
+        // Clear persistent data
+        UserDefaults.standard.removeObject(forKey: "persistentChatMessages")
+        UserDefaults.standard.removeObject(forKey: "persistentSessionXid")
+        UserDefaults.standard.removeObject(forKey: "persistentCurrentXid")
+        UserDefaults.standard.removeObject(forKey: "persistentGeneratedImages")
+
+        // Add initial welcome message
+        chatMessages.append(ChatMessage(role: "assistant", content: "🌟 walk forth, create wonder ✨ what calls to your spirit? 🚶‍♂️💫"))
+
+        print("[session] 🗑️ Cleared session data and reset to initial state")
+    }
+
     // MARK: - Functions
     
     private func updateMapBearing(_ course: Double) {
@@ -472,15 +795,20 @@ struct ContentView: View {
     
     private func updateMapBearingFromCompass(_ heading: Double) {
         // Live rotate map based on compass heading (which direction device is pointing)
-        if let coordinator = mapCoordinator, let userLocation = locationManager.currentLocation {
+        // BUT ignore compass in globe mode - keep north at top
+        if let coordinator = mapCoordinator,
+           let userLocation = locationManager.currentLocation,
+           coordinator.mode == .neon { // Only rotate in neon mode
             isCompassRotating = true
             coordinator.updateBearingWithUserLocation(heading, userLocation: userLocation.coordinate)
-            print("[compass] 🗺️ Live rotating map to compass heading: \(String(format: "%.1f", heading))°")
-            
+            // Live rotating map to compass heading
+
             // Reset flag after rotation completes
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 isCompassRotating = false
             }
+        } else if mapCoordinator?.mode == .globe {
+            print("[compass] 🌍 Ignoring compass in globe mode - keeping north at top")
         }
     }
     
@@ -540,7 +868,7 @@ struct ContentView: View {
     }
     
     private func setupFirebaseListeners(xid: String) {
-        print("Setting up Firebase listeners for xid: \(xid)")
+        print("🔥 ContentView: Setting up Firebase listeners for xid: \(xid)")
         let currentUserId = "ios-user-42"
         
         // Listen for chat messages
@@ -564,6 +892,7 @@ struct ContentView: View {
         // Listen for generated images
         let editObjectRef = database.child("exhibits").child(xid).child("editObject")
         editObjectRef.observe(.value) { snapshot in
+            print("🔥 ContentView: Firebase editObject listener triggered")
             guard let editData = snapshot.value as? [String: Any],
                   let edits = editData["edits"] as? [[String: Any]] else {
                 return
@@ -582,12 +911,78 @@ struct ContentView: View {
                 
                 if let item = userEdit["item"] as? [String: Any],
                    let layers = item["layers"] as? [[String: Any]] {
-                    let newImageUrls = layers.compactMap { $0["url"] as? String }
-                    for imageUrl in newImageUrls {
-                        if !generatedImages.contains(imageUrl) {
-                            generatedImages.append(imageUrl)
+
+                    print("🔍 Firebase: Processing \(layers.count) layers from item")
+
+                    // Process all layers - both image and audio
+                    for (index, layer) in layers.enumerated() {
+                        print("🔍 Firebase: Layer \(index): \(layer)")
+
+                        guard let layerUrl = layer["url"] as? String else {
+                            print("⚠️ Firebase: Layer \(index) missing URL")
+                            continue
+                        }
+
+                        // Check layer type
+                        let layerType = layer["type"] as? String ?? "image"
+                        print("🔍 Firebase: Layer \(index) type: '\(layerType)'")
+
+                        // Check if this is an audio/music layer
+                        if layerType == "audio" || layerType == "music" {
+                            // Handle audio layer
+                            let layerId = layer["id"] as? String ?? "layer_\(index)"
+                            let volume = layer["volume"] as? Float ?? 1.0
+                            let shouldLoop = layer["loop"] as? Bool ?? true
+                            let autoplay = layer["autoplay"] as? Bool ?? true
+
+                            print("🎵 Firebase: Processing \(layerType) layer!")
+                            print("   - ID: \(layerId)")
+                            print("   - URL: \(layerUrl)")
+                            print("   - Volume: \(volume)")
+                            print("   - Loop: \(shouldLoop)")
+                            print("   - Autoplay: \(autoplay)")
+
+                            if let url = URL(string: layerUrl) {
+                                Task {
+                                    print("🎵 Firebase: Starting async load for \(layerId)")
+                                    await layerAudioEngine.loadAudioLayer(layerId: layerId, url: url, volume: volume)
+
+                                    // Auto-play if specified
+                                    if autoplay {
+                                        await MainActor.run {
+                                            print("🎵 Firebase: Auto-playing layer \(layerId)")
+                                            layerAudioEngine.playLayer(layerId: layerId, loop: shouldLoop)
+                                        }
+                                    } else {
+                                        print("🎵 Firebase: Layer \(layerId) loaded but autoplay disabled")
+                                    }
+                                }
+                            } else {
+                                print("❌ Firebase: Invalid URL for audio layer: \(layerUrl)")
+                            }
+                        } else {
+                            // Handle image layer - verify it's actually an image file
+                            let isImageFile = layerUrl.hasSuffix(".jpg") || layerUrl.hasSuffix(".jpeg") ||
+                                            layerUrl.hasSuffix(".png") || layerUrl.hasSuffix(".gif") ||
+                                            layerUrl.hasSuffix(".webp") || layerUrl.hasSuffix(".bmp") ||
+                                            layerUrl.hasSuffix(".tiff") || layerUrl.hasSuffix(".svg")
+
+                            if isImageFile {
+                                print("🖼️ Firebase: Processing \(layerType) layer: \(layerUrl)")
+                                if !generatedImages.contains(layerUrl) {
+                                    generatedImages.append(layerUrl)
+                                    print("✅ Firebase: Added image URL to generatedImages: \(layerUrl)")
+                                } else {
+                                    print("⚠️ Firebase: Image URL already exists in generatedImages: \(layerUrl)")
+                                }
+                            } else {
+                                print("🚫 Firebase: Skipping non-image file \(layerType) layer: \(layerUrl)")
+                                print("   → File extension not recognized as image format")
+                            }
                         }
                     }
+                } else {
+                    print("⚠️ Firebase: No item/layers found in edit data")
                 }
             }
         }
@@ -625,10 +1020,46 @@ struct ContentView: View {
             }
         }
     }
-    
+
+    private func updateNearestCity(_ coordinate: CLLocationCoordinate2D) {
+        let userLocation = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+
+        var nearestCity: WorldCity?
+        var nearestDistance: CLLocationDistance = Double.infinity
+
+        for city in majorCities {
+            let cityLocation = CLLocation(latitude: city.coordinate.latitude, longitude: city.coordinate.longitude)
+            let distance = userLocation.distance(from: cityLocation)
+
+            if distance < nearestDistance {
+                nearestDistance = distance
+                nearestCity = city
+            }
+        }
+
+        if let city = nearestCity {
+            let distanceMiles = nearestDistance / 1609.34  // Convert meters to miles
+            let distanceText: String
+
+            if distanceMiles < 0.1 {
+                distanceText = "\(Int(nearestDistance * 3.28084))FT"  // Show feet for very close distances
+            } else if distanceMiles < 1.0 {
+                distanceText = String(format: "%.1fMI", distanceMiles)
+            } else if distanceMiles < 10.0 {
+                distanceText = String(format: "%.1fMI", distanceMiles)
+            } else {
+                distanceText = "\(Int(distanceMiles))MI"
+            }
+
+            nearestCityText = "\(distanceText) NO OF \(city.name.uppercased())"
+        } else {
+            nearestCityText = "LOCATION UNKNOWN"
+        }
+    }
+
     private func setupAlwaysOnPathTracking() {
         // Location updates are now handled automatically by pathStorage via LocationManager
-        
+
         if !isTrackingPath {
             isTrackingPath = true
             print("[location] 🛤️ Started always-on journey tracking")

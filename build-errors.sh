@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Capture build errors from Xcode logs automatically
 # Usage: ./build-errors.sh [watch]
+#
+# 🤖 CLAUDE: ALWAYS use this script for iOS builds instead of manual xcodebuild commands!
+# This script includes SPM optimizations, fast syntax checking, and proper error extraction.
+# Never run xcodebuild directly - always use ./build-errors.sh
 
 set -euo pipefail
 
-DEVICE_ID="C711B759-365B-5F0F-B096-34B2966475DB"
+DEVICE_ID="00008140-000A292A0CE0801C"
+DEVICECTL_ID="C711B759-365B-5F0F-B096-34B2966475DB"
 BUNDLE_ID="com.filowatt.kiloworld"
 PROJECT="kiloworld.xcodeproj"
 SCHEME="kiloworld"
@@ -12,23 +17,35 @@ SCHEME="kiloworld"
 # Function to check device availability
 check_device() {
     echo "📱 Checking device availability..."
-    
-    # Check if device is connected and available
-    if ! xcrun devicectl list devices | grep -q "$DEVICE_ID"; then
+
+    # Check if device is connected and available (use xcodebuild format with timeout)
+    if ! timeout 30s xcodebuild -project "$PROJECT" -scheme "$SCHEME" -showdestinations 2>/dev/null | grep -q "$DEVICE_ID"; then
+        if [ $? -eq 124 ]; then
+            echo "❌ Device check timed out after 30 seconds"
+            echo "💡 Xcode may be busy or device connection is slow"
+            echo "🔧 Try disconnecting and reconnecting your iPhone"
+            return 1
+        fi
         echo "❌ Device $DEVICE_ID not found or not connected"
         echo "💡 Please connect your iPhone and trust this computer"
         return 1
     fi
-    
-    # Try to get device info to verify it's unlocked and ready
-    if ! xcrun devicectl device info --device "$DEVICE_ID" &>/dev/null; then
-        echo "⚠️  Device found but may be locked or not trusted"
-        echo "💡 Please unlock your device and trust this computer if prompted"
-        echo "⏳ Continuing anyway - build will fail if device is locked..."
+
+    # Try to get device info to verify it's unlocked and ready (with timeout)
+    if ! timeout 10s xcrun devicectl device info details --device "$DEVICECTL_ID" &>/dev/null; then
+        if [ $? -eq 124 ]; then
+            echo "⚠️  Device info check timed out - device may be locked"
+            echo "💡 Please unlock your device and trust this computer"
+            echo "⏳ Continuing anyway - build will fail if device is locked..."
+        else
+            echo "⚠️  Device found but may be locked or not trusted"
+            echo "💡 Please unlock your device and trust this computer if prompted"
+            echo "⏳ Continuing anyway - build will fail if device is locked..."
+        fi
     else
         echo "✅ Device ready for building"
     fi
-    
+
     return 0
 }
 
@@ -61,15 +78,18 @@ show_build_errors() {
         fi
     done
     
-    # Always run full build to catch all errors (linking, frameworks, etc.)
-    if [[ -z "$swift_errors" ]]; then
-        echo "✅ Swift syntax check passed!"
-        echo "🔨 Running full build to catch linking and framework errors..."
-    else
+    # If Swift syntax errors found, exit immediately to avoid timeout
+    if [[ -n "$swift_errors" ]]; then
         echo "❌ Swift syntax errors found:"
+        echo "----------------------------------------"
         echo "$swift_errors"
-        echo "🔨 Running full build anyway to show all errors..."
+        echo "----------------------------------------"
+        echo "🔧 Fix the syntax errors above and run again"
+        return 1
     fi
+
+    echo "✅ Swift syntax check passed!"
+    echo "🔨 Running full build to catch linking and framework errors..."
     
     # Always run the full build - this catches all types of errors
     local build_output
@@ -77,6 +97,8 @@ show_build_errors() {
         -destination "platform=iOS,id=$DEVICE_ID" \
         -skipPackagePluginValidation -skipMacroValidation \
         -onlyUsePackageVersionsFromResolvedFile \
+        -disablePackageRepositoryCache \
+        -skipPackageUpdates \
         -allowProvisioningUpdates \
         build 2>&1 || echo "❌ BUILD FAILED or timed out after 5 minutes")
     
@@ -152,7 +174,7 @@ launch_app() {
     echo "📦 Installing and launching app..."
     
     # Install first
-    if ! xcrun devicectl device install app --device "$DEVICE_ID" "$app_path"; then
+    if ! xcrun devicectl device install app --device "$DEVICECTL_ID" "$app_path"; then
         echo "❌ Failed to install app"
         return 1
     fi
@@ -167,7 +189,7 @@ launch_app() {
     while [[ $attempt -le $max_attempts ]]; do
         echo "🔄 Launch attempt $attempt/$max_attempts..."
         
-        if xcrun devicectl device process launch --device "$DEVICE_ID" --terminate-existing --activate "$BUNDLE_ID" 2>/dev/null; then
+        if xcrun devicectl device process launch --device "$DEVICECTL_ID" --terminate-existing --activate "$BUNDLE_ID" 2>/dev/null; then
             echo "✅ App launched successfully!"
             return 0
         else
@@ -186,7 +208,7 @@ launch_app() {
     
     echo "❌ Failed to launch app after $max_attempts attempts"
     echo "💡 Try manually launching the app, or ensure your device is unlocked"
-    echo "🔧 You can also run: xcrun devicectl device process launch --device $DEVICE_ID $BUNDLE_ID"
+    echo "🔧 You can also run: xcrun devicectl device process launch --device $DEVICECTL_ID $BUNDLE_ID"
     return 1
 }
 

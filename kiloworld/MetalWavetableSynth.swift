@@ -17,11 +17,11 @@ struct SynthParams {
     var filterCutoff: Float = 8000.0
     var filterResonance: Float = 0.3
     
-    // Enhanced ADSR envelope with 3-second attack test
-    var envelopeAttack: Float = 3.0        // 3 SECOND attack for testing envelope
-    var envelopeDecay: Float = 1.0         // 1 second decay
-    var envelopeSustain: Float = 1.0       // FULL sustain level
-    var envelopeRelease: Float = 0.5476    // Vital release time
+    // ADSR envelope - will be set from UserSettings
+    var envelopeAttack: Float = 0.1        // Default attack
+    var envelopeDecay: Float = 0.3         // Default decay
+    var envelopeSustain: Float = 0.7       // Default sustain level
+    var envelopeRelease: Float = 0.5       // Default release
     
     // Wavetable morphing parameters
     var wavetableMorphRate: Float = 0.05   // How fast wavetables morph automatically
@@ -190,20 +190,22 @@ class MetalWavetableSynth {
         audioEngine = AVAudioEngine()
         
         let audioFormat = AVAudioFormat(
-            standardFormatWithSampleRate: 44100.0,
-            channels: 2
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 44100.0,
+            channels: 2,
+            interleaved: true
         )!
-        print("✅ Audio format: 44.1kHz, 2 channels, \(audioFormat.commonFormat)")
-        print("   Sample rate: \(audioFormat.sampleRate)")
-        print("   Channels: \(audioFormat.channelCount)")
-        print("   Format flags: \(audioFormat.formatDescription)")
-        print("   Is interleaved: \(audioFormat.isInterleaved)")
-        print("   Is float: \(audioFormat.commonFormat == .pcmFormatFloat32)")
+        print("[audio] ✅ Audio format: 44.1kHz, 2 channels, \(audioFormat.commonFormat)")
+        print("[audio]    Sample rate: \(audioFormat.sampleRate)")
+        print("[audio]    Channels: \(audioFormat.channelCount)")
+        print("[audio]    Format flags: \(audioFormat.formatDescription)")
+        print("[audio]    Is interleaved: \(audioFormat.isInterleaved)")
+        print("[audio]    Is float: \(audioFormat.commonFormat == .pcmFormatFloat32)")
         
         sourceNode = AVAudioSourceNode(format: audioFormat) { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
             return self?.renderAudio(frameCount: frameCount, audioBufferList: audioBufferList) ?? noErr
         }
-        print("✅ AVAudioSourceNode created")
+        print("[audio] ✅ AVAudioSourceNode created")
         
         guard let engine = audioEngine, let source = sourceNode else { 
             print("❌ Failed to create audio engine or source node")
@@ -396,91 +398,145 @@ class MetalWavetableSynth {
             print("❌ Audio buffer is nil in renderAudio")
             return -1 
         }
-        let audioData = audioBuffer.contents().bindMemory(to: Float.self, capacity: frames) // Mono data from Metal
-        
-        let buffer = audioBufferList.pointee.mBuffers.mData?.bindMemory(to: Float.self, capacity: frames) // Mono iOS buffer
-        guard let outputBuffer = buffer else {
-            print("❌ Output buffer is nil in renderAudio")
-            return -1
+        // Handle both interleaved and non-interleaved formats
+        let isInterleaved = audioBufferList.pointee.mNumberBuffers == 1
+
+        let audioData = audioBuffer.contents().bindMemory(to: Float.self, capacity: frames)
+
+        if isInterleaved {
+            // Interleaved format: LRLRLR...
+            guard let outputBuffer = audioBufferList.pointee.mBuffers.mData?.bindMemory(to: Float.self, capacity: frames * 2) else {
+                print("❌ Interleaved output buffer is nil")
+                return -1
+            }
+
+            // Copy mono to stereo interleaved
+            for i in 0..<frames {
+                let sample = audioData[i]
+                outputBuffer[i * 2] = sample     // Left channel
+                outputBuffer[i * 2 + 1] = sample // Right channel
+            }
+        } else {
+            // Non-interleaved format: separate buffers for L and R
+            let bufferPtr = UnsafeMutableAudioBufferListPointer(audioBufferList)
+
+            guard bufferPtr.count >= 2 else {
+                print("❌ Expected 2 buffers for stereo but got \(bufferPtr.count)")
+                return -1
+            }
+
+            guard let leftBuffer = bufferPtr[0].mData?.bindMemory(to: Float.self, capacity: frames),
+                  let rightBuffer = bufferPtr[1].mData?.bindMemory(to: Float.self, capacity: frames) else {
+                print("❌ Left or right buffer is nil")
+                return -1
+            }
+
+            // Copy mono to both separate buffers
+            for i in 0..<frames {
+                let sample = audioData[i]
+                leftBuffer[i] = sample   // Left channel
+                rightBuffer[i] = sample  // Right channel
+            }
         }
         
         // Log buffer format details occasionally
         if currentSampleIndex % 44100 == 0 {
-            print("🔧 Audio buffer info:")
-            print("   Expected frames: \(frames)")
-            print("   Buffer size: \(audioBufferList.pointee.mBuffers.mDataByteSize) bytes")
-            print("   Channels: \(audioBufferList.pointee.mNumberBuffers)")
-            print("   Expected bytes for stereo: \(frames * 2 * 4) (for Float32)")
-            print("   Actual buffer capacity: \(audioBufferList.pointee.mBuffers.mDataByteSize / 4) floats")
+            print("[audio] 🔧 Audio buffer info:")
+            print("[audio]    Expected frames: \(frames)")
+            print("[audio]    Number of buffers: \(audioBufferList.pointee.mNumberBuffers)")
+            print("[audio]    Buffer 0 size: \(audioBufferList.pointee.mBuffers.mDataByteSize) bytes")
+            print("[audio]    Expected bytes for stereo interleaved: \(frames * 2 * 4) (for Float32)")
+            print("[audio]    Actual buffer capacity: \(audioBufferList.pointee.mBuffers.mDataByteSize / 4) floats")
+
+            // Check if we have multiple buffers (non-interleaved)
+            if audioBufferList.pointee.mNumberBuffers > 1 {
+                print("[audio]    ⚠️  Multiple buffers detected - this is non-interleaved format!")
+                let bufferPtr = UnsafeMutableAudioBufferListPointer(audioBufferList)
+                for (index, buffer) in bufferPtr.enumerated() {
+                    print("[audio]    Buffer \(index): \(buffer.mDataByteSize) bytes")
+                }
+            } else {
+                print("[audio]    ✅ Single buffer - should be interleaved format")
+            }
         }
         
-        // Copy and check for audio signal
+        // Check for audio signal and apply cleanup
         var hasSignal = false
         var maxSample: Float = 0.0
         var noiseCount = 0
-        
-        // Copy mono samples directly - iOS forces mono despite our stereo format request
-        for i in 0..<frames {
-            guard i < 4096 else {
-                print("❌ Frame count \(frames) exceeds buffer size, truncating at \(i)")
-                break
+
+        // Apply cleanup and copy to stereo channels
+        if isInterleaved {
+            // Interleaved format: LRLRLR...
+            guard let outputBuffer = audioBufferList.pointee.mBuffers.mData?.bindMemory(to: Float.self, capacity: frames * 2) else {
+                print("❌ Interleaved output buffer is nil")
+                return -1
             }
-            
-            let sample = audioData[i]
-            maxSample = max(maxSample, abs(sample))
-            
-            // Check for noise when no notes should be active 
-            if activeNoteCount == 0 && abs(sample) > 0.0001 {
-                noiseCount += 1
-            }
-            
-            // Clean up tiny values that might cause noise
-            var cleanSample = sample
-            if activeNoteCount == 0 {
-                cleanSample = 0.0  // Force silence when no notes
-            } else if abs(sample) < 0.000001 {
-                cleanSample = 0.0  // Remove tiny DC offset values
-            }
-            
-            // Direct mono copy - iOS will handle stereo expansion internally
-            outputBuffer[i] = cleanSample
-            
-            if abs(cleanSample) > 0.001 { hasSignal = true }
-            
-            // Debug Metal shader execution detection  
-            if i == 0 && activeNoteCount > 0 {
-                if abs(sample) < 0.000001 {
-                    print("🔴 SILENT TOUCH: Metal shader produced ZERO output")
-                } else if abs(sample - 0.000041) < 0.000001 {
-                    print("🔴 SILENT: Metal sees note.isActive = FALSE")
-                } else if abs(sample - 0.000042) < 0.000001 {
-                    print("🔴 SILENT: Metal sees INVALID noteNumber")
-                } else if abs(sample - 0.000043) < 0.000001 {
-                    print("🔴 SILENT: Metal sees INVALID velocity")
-                } else if abs(sample - 0.000044) < 0.000001 {
-                    print("🔴 SILENT: Metal validation failed for UNKNOWN reason")
-                } else if abs(sample) > 0.01 {
-                    // print("🟢 Metal generating AUDIO: \(String(format: "%.6f", sample))") // DISABLED: too spammy
-                } else {
-                    print("❓ Metal debug unclear: \(String(format: "%.6f", sample))")
+
+            for i in 0..<frames {
+                guard i < 4096 else {
+                    print("❌ Frame count \(frames) exceeds buffer size, truncating at \(i)")
+                    break
                 }
-            }
-            
-            // Debug logging occasionally  
-            if abs(sample) > 0.01 && activeNoteCount > 0 && i % 100 == 0 {
-                // print("✅ Metal→Audio: \(String(format: "%.6f", sample)) → outputBuffer[\(i)]") // DISABLED: too spammy
-            }
-            
-            // CRITICAL: Always log when we have active notes but no audio signal
-            if i == 0 && activeNoteCount > 0 && abs(sample) < 0.001 {
-                print("🚨 SILENT TOUCH: activeNotes=\(activeNoteCount), Metal sample=\(String(format: "%.6f", sample))")
-                // Dump note states to see what Metal actually received
-                for j in 0..<min(3, maxPolyphony) {
-                    let note = activeNotes[j]
-                    if note.isActive {
-                        print("   CPU Voice \(j): active=\(note.isActive), MIDI=\(note.noteNumber), vel=\(note.velocity), time=\(note.startTime)")
-                    }
+
+                let sample = audioData[i]
+                maxSample = max(maxSample, abs(sample))
+
+                // Check for noise when no notes should be active
+                if activeNoteCount == 0 && abs(sample) > 0.0001 {
+                    noiseCount += 1
                 }
+
+                // Clean up tiny values that might cause noise
+                var cleanSample = sample
+                if activeNoteCount == 0 {
+                    cleanSample = 0.0  // Force silence when no notes
+                } else if abs(sample) < 0.000001 {
+                    cleanSample = 0.0  // Remove tiny DC offset values
+                }
+
+                // Copy to both channels
+                outputBuffer[i * 2] = cleanSample     // Left channel
+                outputBuffer[i * 2 + 1] = cleanSample // Right channel
+
+                if abs(cleanSample) > 0.001 { hasSignal = true }
+            }
+        } else {
+            // Non-interleaved format: separate buffers for L and R
+            let bufferPtr = UnsafeMutableAudioBufferListPointer(audioBufferList)
+            guard let leftBuffer = bufferPtr[0].mData?.bindMemory(to: Float.self, capacity: frames),
+                  let rightBuffer = bufferPtr[1].mData?.bindMemory(to: Float.self, capacity: frames) else {
+                print("❌ Left or right buffer is nil")
+                return -1
+            }
+
+            for i in 0..<frames {
+                guard i < 4096 else {
+                    print("❌ Frame count \(frames) exceeds buffer size, truncating at \(i)")
+                    break
+                }
+
+                let sample = audioData[i]
+                maxSample = max(maxSample, abs(sample))
+
+                // Check for noise when no notes should be active
+                if activeNoteCount == 0 && abs(sample) > 0.0001 {
+                    noiseCount += 1
+                }
+
+                // Clean up tiny values that might cause noise
+                var cleanSample = sample
+                if activeNoteCount == 0 {
+                    cleanSample = 0.0  // Force silence when no notes
+                } else if abs(sample) < 0.000001 {
+                    cleanSample = 0.0  // Remove tiny DC offset values
+                }
+
+                // Copy to both separate buffers
+                leftBuffer[i] = cleanSample   // Left channel
+                rightBuffer[i] = cleanSample  // Right channel
+
+                if abs(cleanSample) > 0.001 { hasSignal = true }
             }
         }
         
@@ -491,13 +547,23 @@ class MetalWavetableSynth {
         
         // Log signal status and buffer dump
         if activeNoteCount > 0 && currentSampleIndex % 4410 == 0 {
-            print("🔊 Audio stats: hasSignal=\(hasSignal), maxSample=\(maxSample), activeNotes=\(activeNoteCount)")
-            
+            print("[audio] 🔊 Audio stats: hasSignal=\(hasSignal), maxSample=\(maxSample), activeNotes=\(activeNoteCount)")
+
             // Dump first 20 samples to see the waveform pattern
-            print("📊 Buffer dump (first 20 samples):")
+            print("[audio] 📊 Buffer dump (first 20 samples):")
             for i in 0..<min(20, frames) {
                 let metalSample = audioData[i]
-                print("   [\(i)]: Metal=\(String(format: "%.4f", metalSample)) → L=\(String(format: "%.4f", outputBuffer[i * 2])) R=\(String(format: "%.4f", outputBuffer[i * 2 + 1]))")
+                if isInterleaved {
+                    if let outputBuffer = audioBufferList.pointee.mBuffers.mData?.bindMemory(to: Float.self, capacity: frames * 2) {
+                        print("[audio]    [\(i)]: Metal=\(String(format: "%.4f", metalSample)) → L=\(String(format: "%.4f", outputBuffer[i * 2])) R=\(String(format: "%.4f", outputBuffer[i * 2 + 1]))")
+                    }
+                } else {
+                    let bufferPtr = UnsafeMutableAudioBufferListPointer(audioBufferList)
+                    if let leftBuffer = bufferPtr[0].mData?.bindMemory(to: Float.self, capacity: frames),
+                       let rightBuffer = bufferPtr[1].mData?.bindMemory(to: Float.self, capacity: frames) {
+                        print("[audio]    [\(i)]: Metal=\(String(format: "%.4f", metalSample)) → L=\(String(format: "%.4f", leftBuffer[i])) R=\(String(format: "%.4f", rightBuffer[i]))")
+                    }
+                }
             }
             
             // Calculate expected frequency for first active note
@@ -686,7 +752,7 @@ class MetalWavetableSynth {
     }
     
     func noteOn(noteNumber: Int, velocity: Float, wavetablePosition: Float) {
-        print("🎹 Note ON: \(noteNumber) (velocity: \(String(format: "%.2f", velocity)))")
+        print("[audio] 🎹 Note ON: \(noteNumber) (velocity: \(String(format: "%.2f", velocity)))")
         
         // Find available voice
         for i in 0..<maxPolyphony {
@@ -738,7 +804,7 @@ class MetalWavetableSynth {
     }
     
     func noteOff(noteNumber: Int) {
-        print("🎹 Note OFF: \(noteNumber)")
+        print("[audio] 🎹 Note OFF: \(noteNumber)")
         var foundNote = false
         for i in 0..<maxPolyphony {
             if activeNotes[i].isActive && activeNotes[i].noteNumber == Int32(noteNumber) {
@@ -866,7 +932,7 @@ class MetalWavetableSynth {
     }
     
     func allNotesOff() {
-        print("🎹 ALL NOTES OFF")
+        print("[audio] 🎹 ALL NOTES OFF")
         for i in 0..<maxPolyphony {
             activeNotes[i].isActive = false
             activeNotes[i].velocity = 0.0
@@ -938,7 +1004,17 @@ class MetalWavetableSynth {
     func setMasterVolume(_ volume: Float) {
         synthParams.masterVolume = max(0.0, min(1.0, volume))
     }
-    
+
+    // MARK: - ADSR Envelope Control
+
+    func updateADSR(attack: Float, decay: Float, sustain: Float, release: Float) {
+        synthParams.envelopeAttack = max(0.001, min(3.0, attack))
+        synthParams.envelopeDecay = max(0.001, min(3.0, decay))
+        synthParams.envelopeSustain = max(0.0, min(1.0, sustain))
+        synthParams.envelopeRelease = max(0.001, min(3.0, release))
+        print("[audio] 🎛️ Updated ADSR: A=\(String(format: "%.3f", synthParams.envelopeAttack))s D=\(String(format: "%.3f", synthParams.envelopeDecay))s S=\(String(format: "%.3f", synthParams.envelopeSustain)) R=\(String(format: "%.3f", synthParams.envelopeRelease))s")
+    }
+
     // MARK: - Vital Preset Loading
     
     private func loadVitalPresetFromBundle() {

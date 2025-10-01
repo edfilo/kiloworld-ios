@@ -20,7 +20,7 @@ struct ImageParticle {
     var size: Float
     var opacity: Float
     var category: Float
-    var looseness: Float
+    var normalizedDepth: Float
     var velocity: SIMD3<Float>
     var pixelCoord: SIMD2<Float>
 }
@@ -152,7 +152,7 @@ class ImageSampledHologramRenderer: NSObject, MTKViewDelegate {
             float  size;
             float  opacity;
             float  category;
-            float  looseness;
+            float  normalizedDepth;
             float3 velocity;
             float2 pixelCoord;
         };
@@ -183,7 +183,7 @@ class ImageSampledHologramRenderer: NSObject, MTKViewDelegate {
             float3 color;
             float  opacity;
             float  category;
-            float  looseness;
+            float  normalizedDepth;
         };
 
         // ====================
@@ -205,9 +205,9 @@ class ImageSampledHologramRenderer: NSObject, MTKViewDelegate {
             float3 validColor = clamp(p.color / 255.0, 0.0, 1.0);
             float  validOpacity = clamp(p.opacity, 0.0, 1.0);
             
-            // Background hiding: smoothly fade based on depth mask (stored in looseness)
+            // Background hiding: smoothly fade based on depth mask (stored in normalizedDepth)
             if (uniforms.bgHide > 0.0) {
-                float normalizedDepth = p.looseness; // 0=white(near), 1=black(far)
+                float normalizedDepth = p.normalizedDepth; // 0=white(near), 1=black(far)
                 float fadeStart = 1.0 - uniforms.bgHide; // Start fading at this depth
                 float fadeEnd = 1.0; // Complete fade at depth 1.0
                 float fadeAmount = smoothstep(fadeStart, fadeEnd, normalizedDepth);
@@ -245,7 +245,7 @@ class ImageSampledHologramRenderer: NSObject, MTKViewDelegate {
             out.color      = validColor;
             out.opacity    = validOpacity;
             out.category   = p.category;
-            out.looseness  = p.looseness;
+            out.normalizedDepth  = p.normalizedDepth;
             return out;
         }
 
@@ -306,25 +306,30 @@ class ImageSampledHologramRenderer: NSObject, MTKViewDelegate {
 
             // Wobble effect: random movement around position
             if (uniforms.wobble > 0.0) {
-                // Create time-varying random values for each particle
+                // Create truly different random seeds for each axis with better distribution
                 float hash1 = fract(sin(dot(particle.originalPosition.xy, float2(12.9898, 78.233))) * 43758.5453);
-                float hash2 = fract(sin(dot(particle.originalPosition.yx, float2(39.346, 11.135))) * 43758.5453);
-                float hash3 = fract(sin(dot(particle.originalPosition.xz, float2(93.989, 1.233))) * 43758.5453);
-                
-                // Time-based wobble with different frequencies for each particle
-                float time1 = uniforms.time + hash1 * 6.28;
-                float time2 = uniforms.time + hash2 * 6.28;
-                float time3 = uniforms.time + hash3 * 6.28;
-                
-                // Apply wobble offset
-                float wobbleAmount = uniforms.wobble * 10.0; // Scale factor
-                hologramPos.x += sin(time1 * 2.0) * wobbleAmount * hash1;
-                hologramPos.y += sin(time2 * 1.7) * wobbleAmount * hash2;
-                hologramPos.z += sin(time3 * 2.3) * wobbleAmount * hash3;
+                float hash2 = fract(sin(dot(particle.originalPosition.yz, float2(127.1, 311.7))) * 23421.631);
+                float hash3 = fract(sin(dot(particle.originalPosition.zx, float2(269.5, 183.3))) * 85734.293);
+
+                // Additional hash variations to break up patterns completely
+                float hashX = fract(sin(particle.originalPosition.x * 91.3458 + particle.originalPosition.y * 47.2891) * 47623.2317);
+                float hashY = fract(sin(particle.originalPosition.y * 157.239 + particle.originalPosition.z * 83.7234) * 68329.471);
+                float hashZ = fract(sin(particle.originalPosition.z * 203.847 + particle.originalPosition.x * 71.5392) * 31891.652);
+
+                // Time-based wobble with very different frequencies and phase offsets per axis
+                float time1 = uniforms.time * (0.8 + hashX * 0.6) + hash1 * 6.28;
+                float time2 = uniforms.time * (1.2 + hashY * 0.8) + hash2 * 6.28;
+                float time3 = uniforms.time * (0.9 + hashZ * 0.7) + hash3 * 6.28;
+
+                // Apply wobble with independent frequencies and amplitudes for each axis
+                float wobbleAmount = uniforms.wobble * 8.0; // Slightly reduced for smoother motion
+                hologramPos.x += sin(time1 * 1.7 + hashX * 3.14) * wobbleAmount * hashX;
+                hologramPos.y += sin(time2 * 2.1 + hashY * 3.14) * wobbleAmount * hashY;
+                hologramPos.z += sin(time3 * 1.4 + hashZ * 3.14) * wobbleAmount * hashZ;
             }
 
-            // Store normalized depth in looseness for background hiding in vertex shader
-            particle.looseness = normalizedDepth;
+            // Store normalized depth in normalizedDepth for background hiding in vertex shader
+            particle.normalizedDepth = normalizedDepth;
 
             // Final position this frame
             particle.position = hologramPos;
@@ -423,7 +428,7 @@ class ImageSampledHologramRenderer: NSObject, MTKViewDelegate {
                         size: 0.5 + depthValue * 2.0,
                         opacity: 1.0,
                         category: category,
-                        looseness: 0.0,
+                        normalizedDepth: 0.0,
                         velocity: .zero,
                         pixelCoord: SIMD2<Float>(Float(x), Float(y))
                     )

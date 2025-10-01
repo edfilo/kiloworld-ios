@@ -43,8 +43,16 @@ class UserSettings: ObservableObject {
         didSet { userDefaults.set(hologramDepth, forKey: "hologram_depth") }
     }
     
-    @Published var hologramBgHide: Float = 1.0 {
-        didSet { userDefaults.set(hologramBgHide, forKey: "hologram_bg_hide") }
+    @Published var hologramBgMin: Float = 0.0 {
+        didSet { userDefaults.set(hologramBgMin, forKey: "hologram_bg_min") }
+    }
+
+    @Published var hologramBgMax: Float = 1.0 {
+        didSet { userDefaults.set(hologramBgMax, forKey: "hologram_bg_max") }
+    }
+    
+    @Published var arcRadius: Float = 100.0 {
+        didSet { userDefaults.set(arcRadius, forKey: "arc_radius")}
     }
     
     @Published var hologramDissolve: Float = 0.0 {
@@ -54,7 +62,11 @@ class UserSettings: ObservableObject {
     @Published var hologramWobble: Float = 0.0 {
         didSet { userDefaults.set(hologramWobble, forKey: "hologram_wobble") }
     }
-    
+
+    @Published var hologramWobbleSpeed: Float = 1.0 {
+        didSet { userDefaults.set(hologramWobbleSpeed, forKey: "hologram_wobble_speed") }
+    }
+
     @Published var hologramYPosition: Float = 0.0 {
         didSet { userDefaults.set(hologramYPosition, forKey: "hologram_y_position") }
     }
@@ -70,7 +82,49 @@ class UserSettings: ObservableObject {
     @Published var hologramEmissionSpeed: Float = 0.5 {
         didSet { userDefaults.set(hologramEmissionSpeed, forKey: "hologram_emission_speed") }
     }
-    
+
+    @Published var particleBlink: Float = 0.0 {
+        didSet { userDefaults.set(particleBlink, forKey: "particle_blink") }
+    }
+
+    @Published var particleRandomSize: Float = 0.0 {
+        didSet { userDefaults.set(particleRandomSize, forKey: "particle_random_size") }
+    }
+
+    @Published var particleGlow: Float = 0.0 {
+        didSet { userDefaults.set(particleGlow, forKey: "particle_glow") }
+    }
+
+    @Published var horizonWidth: Float = 0.4 {
+        didSet { userDefaults.set(horizonWidth, forKey: "horizon_width") }
+    }
+
+    @Published var horizonStart: Float = 2.0 {
+        didSet { userDefaults.set(horizonStart, forKey: "horizon_start") }
+    }
+
+    @Published var horizonFeather: Float = 0.06 {
+        didSet { userDefaults.set(horizonFeather, forKey: "horizon_feather") }
+    }
+
+    // MARK: - Synth ADSR Settings
+
+    @Published var synthAttack: Float = 0.1 {
+        didSet { userDefaults.set(synthAttack, forKey: "synth_attack") }
+    }
+
+    @Published var synthDecay: Float = 0.3 {
+        didSet { userDefaults.set(synthDecay, forKey: "synth_decay") }
+    }
+
+    @Published var synthSustain: Float = 0.7 {
+        didSet { userDefaults.set(synthSustain, forKey: "synth_sustain") }
+    }
+
+    @Published var synthRelease: Float = 0.5 {
+        didSet { userDefaults.set(synthRelease, forKey: "synth_release") }
+    }
+
     // MARK: - Initialization
     
     init() {
@@ -104,14 +158,23 @@ class UserSettings: ObservableObject {
         if userDefaults.object(forKey: "hologram_depth") != nil {
             hologramDepth = userDefaults.float(forKey: "hologram_depth")
         }
-        if userDefaults.object(forKey: "hologram_bg_hide") != nil {
-            hologramBgHide = userDefaults.float(forKey: "hologram_bg_hide")
+        if userDefaults.object(forKey: "hologram_bg_min") != nil {
+            hologramBgMin = userDefaults.float(forKey: "hologram_bg_min")
+        }
+        if userDefaults.object(forKey: "hologram_bg_max") != nil {
+            hologramBgMax = userDefaults.float(forKey: "hologram_bg_max")
+        }
+        if userDefaults.object(forKey: "arc_radius") != nil {
+            arcRadius = userDefaults.float(forKey: "arc_radius")
         }
         if userDefaults.object(forKey: "hologram_dissolve") != nil {
             hologramDissolve = userDefaults.float(forKey: "hologram_dissolve")
         }
         if userDefaults.object(forKey: "hologram_wobble") != nil {
             hologramWobble = userDefaults.float(forKey: "hologram_wobble")
+        }
+        if userDefaults.object(forKey: "hologram_wobble_speed") != nil {
+            hologramWobbleSpeed = userDefaults.float(forKey: "hologram_wobble_speed")
         }
         if userDefaults.object(forKey: "hologram_y_position") != nil {
             hologramYPosition = userDefaults.float(forKey: "hologram_y_position")
@@ -125,7 +188,38 @@ class UserSettings: ObservableObject {
         if userDefaults.object(forKey: "hologram_emission_speed") != nil {
             hologramEmissionSpeed = userDefaults.float(forKey: "hologram_emission_speed")
         }
-        
+        if userDefaults.object(forKey: "particle_blink") != nil {
+            particleBlink = userDefaults.float(forKey: "particle_blink")
+        }
+        if userDefaults.object(forKey: "particle_random_size") != nil {
+            particleRandomSize = userDefaults.float(forKey: "particle_random_size")
+        }
+        if userDefaults.object(forKey: "particle_glow") != nil {
+            particleGlow = userDefaults.float(forKey: "particle_glow")
+        }
+        if userDefaults.object(forKey: "horizon_width") != nil {
+            horizonWidth = userDefaults.float(forKey: "horizon_width")
+        }
+        if userDefaults.object(forKey: "horizon_start") != nil {
+            horizonStart = userDefaults.float(forKey: "horizon_start")
+        }
+        if userDefaults.object(forKey: "horizon_feather") != nil {
+            horizonFeather = userDefaults.float(forKey: "horizon_feather")
+        }
+        if userDefaults.object(forKey: "synth_attack") != nil {
+            synthAttack = userDefaults.float(forKey: "synth_attack")
+        }
+        if userDefaults.object(forKey: "synth_decay") != nil {
+            synthDecay = userDefaults.float(forKey: "synth_decay")
+        }
+        if userDefaults.object(forKey: "synth_sustain") != nil {
+            synthSustain = userDefaults.float(forKey: "synth_sustain")
+        }
+        if userDefaults.object(forKey: "synth_release") != nil {
+            synthRelease = userDefaults.float(forKey: "synth_release")
+        }
+
+        print("[settings] 📱 Loaded ADSR: A=\(synthAttack) D=\(synthDecay) S=\(synthSustain) R=\(synthRelease)")
         print("[settings] 📱 Loaded UI settings and hologram controls")
     }
     
@@ -139,13 +233,26 @@ class UserSettings: ObservableObject {
         hologramSize = 0.4
         hologramZoom = 0.5
         hologramDepth = 0.0
-        hologramBgHide = 1.0
+        hologramBgMin = 0.0
+        hologramBgMax = 1.0
+        arcRadius = 100.0
         hologramDissolve = 0.0
         hologramWobble = 0.0
+        hologramWobbleSpeed = 1.0
         hologramYPosition = 0.0
         hologramParticleCount = 30000.0
         hologramEmissionDensity = 0.08
         hologramEmissionSpeed = 0.5
+        particleBlink = 0.0
+        particleRandomSize = 0.0
+        particleGlow = 0.0
+        horizonWidth = 0.4
+        horizonStart = 2.0
+        horizonFeather = 0.06
+        synthAttack = 0.1
+        synthDecay = 0.3
+        synthSustain = 0.7
+        synthRelease = 0.5
         print("[settings] 🔄 Reset to default settings")
     }
 }

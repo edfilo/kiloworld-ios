@@ -192,7 +192,7 @@ class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
         if abs(heading - currentHeading) > 2.0 { // More responsive - update every 2 degrees
             currentHeading = heading
             onHeadingUpdate?(heading)
-            print("[location] 🧭 Compass heading updated: \(String(format: "%.1f", heading))°")
+            // Compass heading updated
         }
     }
     

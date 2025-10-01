@@ -25,12 +25,14 @@ struct TypewriterMessageView: View {
                 HStack {
                     Spacer()
                     
-                    Text(displayedText + (showCursor && currentIndex < latestMessage.count ? "|" : ""))
-                        .font(.system(size: 18, weight: .medium, design: .monospaced))
-                        .foregroundColor(.cyan.opacity(0.9))
+                    Text(displayedText + (showCursor && currentIndex < latestMessage.count ? "▌" : ""))
+                        .font(.system(size: 15, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.cyan)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 20)
-                        .shadow(color: .cyan.opacity(0.5), radius: 3, x: 0, y: 1)
+                        .shadow(color: .cyan, radius: 3, x: 0, y: 0)
+                        .shadow(color: .blue.opacity(0.3), radius: 1, x: 0, y: 0)
+                        .shadow(color: .white.opacity(0.4), radius: 0.5, x: 0, y: 0)
                     
                     Spacer()
                 }

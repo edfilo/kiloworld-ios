@@ -11,7 +11,7 @@ import CoreLocation
 struct UserModalView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var pathStorage: JourneyPathStorage
-    let mapCoordinator: NeonGridMapView.Coordinator?
+    let mapCoordinator: CustomMapView.Coordinator?
     let userLocation: CLLocationCoordinate2D?
     @Binding var dynamicTopPadding: Double // Binding to control camera top padding
     @Binding var dynamicBottomPadding: Double // Binding to control camera bottom padding
@@ -22,6 +22,7 @@ struct UserModalView: View {
     @ObservedObject var userSettings: UserSettings // User settings for hologram controls
     @Binding var generatedImages: [String] // Generated images from Firebase
     @Binding var sessionXid: String? // Current session XID
+    let onSessionClear: () -> Void // Callback to clear session data
     @State private var showingDeleteAlert = false
     @State private var journeyToDelete: JourneySession?
     
@@ -34,22 +35,16 @@ struct UserModalView: View {
                 VStack(spacing: 20) {
                     // Debug Section (top)
                     debugSection
-                    
-                    // Hologram Controls Section
-                    hologramControlsSection
-                    
+
                     // Current Journey Section
                     currentJourneySection
-                    
+
                     // Statistics Section
                     statisticsSection
-                    
+
                     // All Journeys Section
                     allJourneysSection
-                    
-                    // Test Sliders Section
-                    testSlidersSection
-                    
+
                     Spacer()
                 }
                 .padding()
@@ -60,6 +55,8 @@ struct UserModalView: View {
             .navigationBarItems(trailing: Button("Done") {
                 dismiss()
             })
+            .toolbarBackground(Color.black, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
         }
         .background(Color.clear) // Transparent modal background
         .presentationBackground(Color.black.opacity(0.3)) // Semi-transparent sheet background
@@ -169,6 +166,7 @@ struct UserModalView: View {
                     // Main save button - prominent
                     Button("Save Journey & Start New") {
                         pathStorage.publishCurrentJourney()
+                        onSessionClear() // Clear chat and creative session
                         // Start a new journey automatically after saving
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                             pathStorage.clearCurrentPath()
@@ -185,6 +183,7 @@ struct UserModalView: View {
                     HStack(spacing: 8) {
                         Button("Just Publish") {
                             pathStorage.publishCurrentJourney()
+                            onSessionClear() // Clear chat and creative session
                         }
                         .foregroundColor(.white)
                         .padding(.horizontal, 12)
@@ -195,6 +194,7 @@ struct UserModalView: View {
                         
                         Button("Clear Only") {
                             pathStorage.clearCurrentPath()
+                            onSessionClear() // Clear chat and creative session
                         }
                         .foregroundColor(.white)
                         .padding(.horizontal, 12)
@@ -279,438 +279,6 @@ struct UserModalView: View {
         .background(Color.black.opacity(0.05))
         .cornerRadius(12)
     }
-    
-    private var testSlidersSection: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Test Controls")
-                .font(.headline)
-                .fontWeight(.bold)
-                .foregroundColor(.white)
-            
-            // Dynamic Top Camera Padding Slider (controls puck position)
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Top Camera Padding")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
-                    Spacer()
-                    Text("\(Int(dynamicTopPadding))px")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.white)
-                }
-                
-                Slider(value: $dynamicTopPadding, in: 0...600, step: 10)
-                    .onChange(of: dynamicTopPadding) { _, newValue in
-                        print("[modal] 🎛️ Top camera padding changed to: \(newValue)px - Puck positioning updated!")
-                        // No need for updateCameraPadding - the binding automatically updates the camera system
-                    }
-            }
-            
-            // Dynamic Bottom Camera Padding Slider
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Bottom Camera Padding")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
-                    Spacer()
-                    Text("\(Int(dynamicBottomPadding))px")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.white)
-                }
-                
-                Slider(value: $dynamicBottomPadding, in: 0...200, step: 10)
-                    .onChange(of: dynamicBottomPadding) { _, newValue in
-                        print("[modal] 🎛️ Bottom camera padding changed to: \(newValue)px")
-                        // The binding automatically updates the camera system
-                    }
-            }
-            
-            // Default Pitch Slider
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Default Pitch")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
-                    Spacer()
-                    Text("\(Int(defaultPitch))°")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.white)
-                }
-                
-                Slider(value: $defaultPitch, in: 0...85, step: 5)
-                    .onChange(of: defaultPitch) { _, newValue in
-                        print("[modal] 🎛️ Default pitch changed to: \(newValue)°")
-                        // The binding automatically updates the camera system
-                    }
-            }
-            
-            // Default Zoom Slider
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Default Zoom")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
-                    Spacer()
-                    Text(String(format: "%.1f", defaultZoom))
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.white)
-                }
-                
-                Slider(value: $defaultZoom, in: 8...20, step: 0.5)
-                    .onChange(of: defaultZoom) { _, newValue in
-                        print("[modal] 🎛️ Default zoom changed to: \(newValue)")
-                        // The binding automatically updates the camera system
-                    }
-            }
-            
-            
-            // Test Zoom Slider
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Map Zoom")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
-                    Spacer()
-                    Text(String(format: "%.1f", testZoom))
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.white)
-                }
-                
-                Slider(value: $testZoom, in: 8...20, step: 0.5)
-                    .onChange(of: testZoom) { _, newValue in
-                        updateCameraZoom(newValue)
-                    }
-            }
-        }
-        .padding()
-        .background(Color.black.opacity(0.05))
-        .cornerRadius(12)
-    }
-    
-    private var hologramControlsSection: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Hologram Controls")
-                .font(.headline)
-                .fontWeight(.bold)
-                .foregroundColor(.white)
-            
-            // Rotation Slider
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Rotation")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
-                    Spacer()
-                    Text(String(format: "%.2f", userSettings.hologramRotation))
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.white)
-                }
-                Slider(value: $userSettings.hologramRotation, in: 0...6.28, step: 0.1)
-            }
-            
-            // Rotation Speed Slider
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Rotation Speed")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
-                    Spacer()
-                    Text(String(format: "%.2f", userSettings.hologramRotSpeed))
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.white)
-                }
-                Slider(value: $userSettings.hologramRotSpeed, in: 0...3.0, step: 0.1)
-            }
-            
-            // Size Slider
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Size")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
-                    Spacer()
-                    Text(String(format: "%.2f", userSettings.hologramSize))
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.white)
-                }
-                Slider(value: $userSettings.hologramSize, in: 0.1...2.0, step: 0.1)
-            }
-            
-            // Zoom Slider
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Zoom")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
-                    Spacer()
-                    Text(String(format: "%.2f", userSettings.hologramZoom))
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.white)
-                }
-                Slider(value: $userSettings.hologramZoom, in: 0.01...1.0, step: 0.01)
-            }
-            
-            // Depth Slider
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Depth")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
-                    Spacer()
-                    Text(String(format: "%.2f", userSettings.hologramDepth))
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.white)
-                }
-                Slider(value: $userSettings.hologramDepth, in: -10.0...10.0, step: 0.1)
-            }
-            
-            // Background Hide Slider
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("BG Hide")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
-                    Spacer()
-                    Text(String(format: "%.2f", userSettings.hologramBgHide))
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.white)
-                }
-                Slider(value: $userSettings.hologramBgHide, in: 0.0...1.0, step: 0.05)
-            }
-            
-            // Dissolve Slider
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Dissolve")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
-                    Spacer()
-                    Text(String(format: "%.2f", userSettings.hologramDissolve))
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.white)
-                }
-                Slider(value: $userSettings.hologramDissolve, in: 0.0...1.0, step: 0.05)
-            }
-            
-            // Wobble Slider
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Wobble")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
-                    Spacer()
-                    Text(String(format: "%.2f", userSettings.hologramWobble))
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.white)
-                }
-                Slider(value: $userSettings.hologramWobble, in: 0.0...10.0, step: 0.1)
-            }
-            
-            // Y Position Slider
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Y Position")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
-                    Spacer()
-                    Text(String(format: "%.2f", userSettings.hologramYPosition))
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.white)
-                }
-                Slider(value: $userSettings.hologramYPosition, in: -1.0...1.0, step: 0.05)
-            }
-
-            // Particle Count Slider
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Particle Count")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text(formatParticleCount(userSettings.hologramParticleCount))
-                            .font(.caption)
-                            .fontWeight(.medium)
-                            .foregroundColor(.white)
-                        Text(getPerformanceIndicator(userSettings.hologramParticleCount))
-                            .font(.system(size: 9))
-                            .foregroundColor(getPerformanceColor(userSettings.hologramParticleCount))
-                    }
-                }
-                Slider(value: $userSettings.hologramParticleCount, in: 1000...100000, step: 1000, onEditingChanged: { editing in
-                    if !editing {
-                        // User released the slider - trigger particle system rebuild
-                        print("🔄 Particle count changed to \(Int(userSettings.hologramParticleCount)) - will rebuild system")
-                        // TODO: Implement particle system rebuild logic
-                    }
-                })
-
-                // Preset buttons for common particle counts
-                HStack(spacing: 8) {
-                    Button("Fast (5K)") {
-                        userSettings.hologramParticleCount = 5000
-                    }
-                    .font(.caption)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.green.opacity(0.2))
-                    .foregroundColor(.green)
-                    .cornerRadius(4)
-
-                    Button("Balanced (30K)") {
-                        userSettings.hologramParticleCount = 30000
-                    }
-                    .font(.caption)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.blue.opacity(0.2))
-                    .foregroundColor(.blue)
-                    .cornerRadius(4)
-
-                    Button("Beautiful (75K)") {
-                        userSettings.hologramParticleCount = 75000
-                    }
-                    .font(.caption)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.purple.opacity(0.2))
-                    .foregroundColor(.purple)
-                    .cornerRadius(4)
-
-                    Spacer()
-                }
-            }
-
-            // Emission Density Slider
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Emission Density")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text("\(String(format: "%.1f", userSettings.hologramEmissionDensity * 100))%")
-                            .font(.caption)
-                            .fontWeight(.medium)
-                            .foregroundColor(.white)
-                        Text(getEmissionIndicator(userSettings.hologramEmissionDensity))
-                            .font(.system(size: 9))
-                            .foregroundColor(getEmissionColor(userSettings.hologramEmissionDensity))
-                    }
-                }
-                Slider(value: $userSettings.hologramEmissionDensity, in: 0.01...0.1, step: 0.005)
-
-                // Preset buttons for emission density
-                HStack(spacing: 8) {
-                    Button("Light (3%)") {
-                        userSettings.hologramEmissionDensity = 0.03
-                    }
-                    .font(.caption)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.cyan.opacity(0.2))
-                    .foregroundColor(.cyan)
-                    .cornerRadius(4)
-
-                    Button("Medium (6%)") {
-                        userSettings.hologramEmissionDensity = 0.06
-                    }
-                    .font(.caption)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.blue.opacity(0.2))
-                    .foregroundColor(.blue)
-                    .cornerRadius(4)
-
-                    Button("Dense (10%)") {
-                        userSettings.hologramEmissionDensity = 0.1
-                    }
-                    .font(.caption)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.purple.opacity(0.2))
-                    .foregroundColor(.purple)
-                    .cornerRadius(4)
-
-                    Spacer()
-                }
-            }
-
-            // Emission Speed Slider
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Emission Speed")
-                        .font(.subheadline)
-                        .foregroundColor(.white)
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text(getSpeedLabel(userSettings.hologramEmissionSpeed))
-                            .font(.caption)
-                            .fontWeight(.medium)
-                            .foregroundColor(.white)
-                        Text(getSpeedIndicator(userSettings.hologramEmissionSpeed))
-                            .font(.system(size: 9))
-                            .foregroundColor(getSpeedColor(userSettings.hologramEmissionSpeed))
-                    }
-                }
-                Slider(value: $userSettings.hologramEmissionSpeed, in: 0.0...1.0, step: 0.05)
-
-                // Preset buttons for emission speed
-                HStack(spacing: 8) {
-                    Button("Slow") { userSettings.hologramEmissionSpeed = 0.2 }
-                        .font(.caption)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.orange.opacity(0.2))
-                        .foregroundColor(.orange)
-                        .cornerRadius(4)
-
-                    Button("Medium") { userSettings.hologramEmissionSpeed = 0.5 }
-                        .font(.caption)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.blue.opacity(0.2))
-                        .foregroundColor(.blue)
-                        .cornerRadius(4)
-
-                    Button("Fast") { userSettings.hologramEmissionSpeed = 0.8 }
-                        .font(.caption)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.green.opacity(0.2))
-                        .foregroundColor(.green)
-                        .cornerRadius(4)
-
-                    Spacer()
-                }
-            }
-        }
-        .padding()
-        .background(Color.black.opacity(0.2))
-        .cornerRadius(12)
-    }
-    
-    private func updateCameraZoom(_ zoom: Double) {
-        guard let userLocation = userLocation else {
-            print("[modal] ❌ No user location for zoom update")
-            return
-        }
-        mapCoordinator?.updateCameraZoom(zoom, userLocation: userLocation)
-    }
 
     // Particle count formatting and performance helpers
     private func formatParticleCount(_ count: Float) -> String {
@@ -729,9 +297,9 @@ struct UserModalView: View {
         case 15001...50000:
             return "Balanced"
         case 50001...75000:
-            return "Detailed"
+            return "Intense"
         default:
-            return "Intensive"
+            return "Extreme"
         }
     }
 
@@ -748,80 +316,18 @@ struct UserModalView: View {
         }
     }
 
-    // Emission density helpers (updated for 0.01-0.1 range)
-    private func getEmissionIndicator(_ density: Float) -> String {
-        switch density {
-        case 0...0.03:
-            return "Sparse"
-        case 0.031...0.06:
-            return "Moderate"
-        case 0.061...0.08:
-            return "Dense"
-        default:
-            return "Maximum"
-        }
-    }
-
-    private func getEmissionColor(_ density: Float) -> Color {
-        switch density {
-        case 0...0.03:
-            return .cyan
-        case 0.031...0.06:
-            return .blue
-        case 0.061...0.08:
-            return .purple
-        default:
-            return .pink
-        }
-    }
-
-    // Emission speed helpers
-    private func getSpeedLabel(_ speed: Float) -> String {
-        // Convert to travel time: speed 0 → 8.0s, speed 1 → 2.0s
-        let minT: Float = 2.0
-        let maxT: Float = 8.0
-        let travelTime = maxT - speed * (maxT - minT)
-        return String(format: "%.1fs", travelTime)
-    }
-
-    private func getSpeedIndicator(_ speed: Float) -> String {
-        switch speed {
-        case 0...0.3:
-            return "Slow"
-        case 0.301...0.7:
-            return "Medium"
-        default:
-            return "Fast"
-        }
-    }
-
-    private func getSpeedColor(_ speed: Float) -> Color {
-        switch speed {
-        case 0...0.3:
-            return .orange
-        case 0.301...0.7:
-            return .blue
-        default:
-            return .green
-        }
-    }
-}
-
-struct StatCard: View {
-    let title: String
-    let value: String
-    let icon: String
-    
-    var body: some View {
-        VStack(spacing: 8) {
+    // Helper view for StatCard
+    private func StatCard(title: String, value: String, icon: String) -> some View {
+        VStack(alignment: .center, spacing: 6) {
             Image(systemName: icon)
                 .font(.title2)
                 .foregroundColor(.blue)
-            
+
             Text(title)
                 .font(.caption)
-                .foregroundColor(.gray)
-            
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+
             Text(value)
                 .font(.headline)
                 .fontWeight(.bold)
@@ -831,58 +337,35 @@ struct StatCard: View {
         .cornerRadius(8)
         .shadow(color: .black.opacity(0.1), radius: 2, x: 0, y: 1)
     }
-}
 
-struct JourneyRow: View {
-    let journey: JourneySession
-    let onDelete: () -> Void
-    
-    var body: some View {
+    // Helper view for JourneyRow
+    private func JourneyRow(journey: JourneySession, onDelete: @escaping () -> Void) -> some View {
         HStack {
             VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text(journey.startTime, style: .date)
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
-                    
-                    Spacer()
-                    
-                    if journey.isPublished {
-                        Text("Published")
-                            .font(.caption)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 2)
-                            .background(Color.green.opacity(0.2))
-                            .foregroundColor(.green)
-                            .cornerRadius(4)
-                    }
+                Text("Journey \(journey.id.uuidString.prefix(8))")
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.black)
+
+                if let duration = journey.duration {
+                    Text("Duration: \(pathStorage.formattedDuration(duration))")
+                        .font(.caption)
+                        .foregroundColor(.gray)
                 }
-                
-                HStack {
-                    Text("Distance: \(JourneyPathStorage().formattedDistance(journey.totalDistance))")
+
+                if journey.isPublished {
+                    Text("Published")
                         .font(.caption)
-                        .foregroundColor(.gray)
-                    
-                    Text("•")
-                        .foregroundColor(.gray)
-                    
-                    Text("Points: \(journey.coordinates.count)")
-                        .font(.caption)
-                        .foregroundColor(.gray)
-                    
-                    if let duration = journey.duration {
-                        Text("•")
-                            .foregroundColor(.gray)
-                        
-                        Text("Duration: \(JourneyPathStorage().formattedDuration(duration))")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                    }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .background(Color.green.opacity(0.2))
+                        .foregroundColor(.green)
+                        .cornerRadius(4)
                 }
             }
-            
+
             Spacer()
-            
+
             Button(action: onDelete) {
                 Image(systemName: "trash")
                     .foregroundColor(.red)

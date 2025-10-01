@@ -31,6 +31,9 @@ struct ParticleParams {
     var userScale: Float = 1.0    // User zoom level
     var userRotationY: Float = 0.0 // User Y rotation (horizontal drag)
     var userRotationX: Float = 0.0 // User X rotation (vertical drag)
+    var particleBlink: Float = 0.0    // Blink rate: 0=no blink, 1=random blink 0.5-5.0s
+    var particleRandomSize: Float = 0.0 // Size variation: 0=uniform, 1=varied
+    var particleGlow: Float = 0.0     // Glow effect: 0=sharp circles, 1=soft glow
 }
 
 class ParticleDissolveSystem {

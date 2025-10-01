@@ -19,7 +19,7 @@ struct ImageParticle {
     var size: Float
     var opacity: Float
     var category: Float
-    var looseness: Float
+    var normalizedDepth: Float
     var velocity: SIMD3<Float>
     var pixelCoord: SIMD2<Float>
     var emissionSeed: Float // Random seed for emission timing, set once at creation
@@ -33,9 +33,12 @@ struct Uniforms {
     var sizeMultiplier: Float
     var zoom: Float
     var depthScale: Float
-    var bgHide: Float
+    var bgMin: Float
+    var bgMax: Float
+    var arcRadius: Float
     var dissolve: Float
     var wobble: Float
+    var wobbleSpeed: Float
     var yOffset: Float
     var centerPoint: SIMD4<Float>         // <- was SIMD3
     var imageDimensions: SIMD2<Float>
@@ -46,6 +49,9 @@ struct Uniforms {
     var emissionPeriodSec: Float          // P
     var travelTimeSec: Float              // T
     var arcHeight: Float                  // arc height
+    var particleBlink: Float              // Blink rate: 0=no blink, 1=random blink
+    var particleRandomSize: Float         // Size variation: 0=uniform, 1=varied
+    var particleGlow: Float               // Glow effect: 0=sharp circles, 1=soft glow
 }
 
 struct HologramMetalView: UIViewRepresentable {
@@ -105,6 +111,11 @@ struct HologramMetalView: UIViewRepresentable {
         private var particleCount: Int = 0
         private var centerPoint = SIMD3<Float>(0, 0, 0)
         private var imageDimensions = SIMD2<Float>(0, 0)
+
+        // Current image source tracking
+        private var currentImageURL: String?
+        private var currentImageData: (originalImage: UIImage, maskImage: UIImage)?
+        private var isUsingRemoteImage: Bool = false
         
         // Animation parameters
         private var time: Float = 0
@@ -112,12 +123,18 @@ struct HologramMetalView: UIViewRepresentable {
         private var rotSpeed: Float = 0.6
         private var sizeMultiplier: Float = 0.4
         private var zoom: Float = 0.5
-        private var depthScale: Float = -5.0
-        private var bgHide: Float = 1.0
+        private var depthScale: Float = 1.0
+        private var arcRadius: Float = 200.0
+        private var bgMin: Float = 0.0
+        private var bgMax: Float = 1.0
         private var dissolve: Float = 0.0
         private var wobble: Float = 0.0
+        private var wobbleSpeed: Float = 1.0
         private var yOffset: Float = 0.0
         private var emissionDensity: Float = 0.8
+        private var particleBlink: Float = 0.0
+        private var particleRandomSize: Float = 0.0
+        private var particleGlow: Float = 0.0
         private var emissionPeriodSec: Float = 8.0
         private var travelTimeSec: Float = 5.0
         private var arcHeight: Float = 50.0
@@ -125,6 +142,9 @@ struct HologramMetalView: UIViewRepresentable {
         // Puck emission system - lifecycle phase for existing particles
         private var puckScreenPosition: CGPoint = CGPoint(x: 0, y: 0)
         private let maxEmittingParticles = 150 // How many particles emit at once
+
+        // Globe mode state
+        private var isInGlobeMode: Bool = false
 
         // Particle count management
         private var currentParticleCount: Int = 30000
@@ -196,12 +216,22 @@ struct HologramMetalView: UIViewRepresentable {
             rotSpeed = settings.hologramRotSpeed
             sizeMultiplier = settings.hologramSize
             zoom = settings.hologramZoom
-            depthScale = settings.hologramDepth // Direct mapping: -10 to +10
-            bgHide = settings.hologramBgHide
+            depthScale = settings.hologramDepth // Direct mapping: -100 to +100 (range -20 to +20)
+            arcRadius = settings.arcRadius // Direct mapping from slider
+            bgMin = settings.hologramBgMin
+            bgMax = settings.hologramBgMax
+            print("[hologram] 🎭 Background hiding: bgMin=\(bgMin), bgMax=\(bgMax)")
             dissolve = settings.hologramDissolve
             wobble = settings.hologramWobble
-            yOffset = settings.hologramYPosition * 250.0 // Map -1 to +1 to -250 to +250 units (positive = up) - 2.5x higher
+            wobbleSpeed = settings.hologramWobbleSpeed
+            yOffset = settings.hologramYPosition * 500.0 // Map -1 to +1 to -500 to +500 units (positive = up) - doubled from 250
             emissionDensity = settings.hologramEmissionDensity
+            particleBlink = settings.particleBlink
+            particleRandomSize = settings.particleRandomSize
+            particleGlow = settings.particleGlow
+            print("[emission] ⚡ Emission density changed to: \(emissionDensity)")
+            print("[emission] 🔍 bgMin: \(settings.hologramBgMin), bgMax: \(settings.hologramBgMax)")
+            print("[emission] 🔍 Particle count: \(particleCount)")
 
             // Map speed slider to travelTimeSec (lower time = faster)
             // speed 0 → 8.0s (slow), speed 1 → 2.0s (fast)
@@ -228,6 +258,18 @@ struct HologramMetalView: UIViewRepresentable {
             // This ensures the emission point stays at the same screen location regardless of zoom
         }
 
+        func setGlobeMode(_ globeMode: Bool) {
+            isInGlobeMode = globeMode
+
+            // When entering globe mode, reset rotation to face us (0 degrees)
+            if globeMode {
+                rotation = 0.0
+                print("[hologram] 🌍 Globe mode enabled - rotation paused and reset to face user")
+            } else {
+                print("[hologram] 🌍 Globe mode disabled - rotation resumed")
+            }
+        }
+
         private func scheduleParticleRebuild(newCount: Int) {
             // Cancel any existing timer
             particleRebuildTimer?.invalidate()
@@ -239,15 +281,27 @@ struct HologramMetalView: UIViewRepresentable {
         }
 
         private func rebuildParticleSystem(targetCount: Int) {
-            print("🔨 Rebuilding particle system with \(targetCount) particles...")
+            print("[hologram] 🔨 Rebuilding particle system with \(targetCount) particles...")
 
             // Update current count
             currentParticleCount = targetCount
 
-            // Reload particles with new target count
-            loadParticlesFromImages(targetCount: targetCount)
+            // Reload particles based on current image source
+            if let cachedImageData = currentImageData {
+                // We have cached image data, use it
+                print("[hologram] 🔄 Rebuilding with cached remote images")
+                loadParticlesFromDownloadedImages(originalImage: cachedImageData.originalImage, maskImage: cachedImageData.maskImage, targetCount: targetCount)
+            } else if let currentURL = currentImageURL {
+                // We have a URL but no cached data, re-download
+                print("[hologram] 🔄 Rebuilding with remote URL: \(currentURL)")
+                loadHologramFromURL(currentURL, targetCount: targetCount)
+            } else {
+                // No remote image, use local default
+                print("[hologram] 🔄 Rebuilding with local images")
+                loadParticlesFromImages(targetCount: targetCount)
+            }
 
-            print("✅ Particle system rebuilt with \(particleCount) particles")
+            print("[hologram] ✅ Particle system rebuild completed")
         }
         
         
@@ -324,7 +378,7 @@ struct HologramMetalView: UIViewRepresentable {
                 float  size;
                 float  opacity;
                 float  category;
-                float  looseness;
+                float  normalizedDepth;
                 float3 velocity;
                 float2 pixelCoord;
                 float  emissionSeed; // Random seed for emission timing
@@ -338,9 +392,12 @@ struct HologramMetalView: UIViewRepresentable {
                 float    sizeMultiplier;
                 float    zoom;
                 float    depthScale;
-                float    bgHide;
+                float    bgMin;
+                float    bgMax;
+                float    arcRadius;
                 float    dissolve;
                 float    wobble;
+                float    wobbleSpeed;
                 float    yOffset;
                 float4   centerPoint;        // <- was float3
                 float2   imageDimensions;
@@ -351,6 +408,9 @@ struct HologramMetalView: UIViewRepresentable {
                 float    emissionPeriodSec;
                 float    travelTimeSec;
                 float    arcHeight;
+                float    particleBlink;
+                float    particleRandomSize;
+                float    particleGlow;
             };
 
             struct VertexOut {
@@ -359,7 +419,8 @@ struct HologramMetalView: UIViewRepresentable {
                 float3 color;
                 float  opacity;
                 float  category;
-                float  looseness;
+                float  normalizedDepth;
+                float  glowAmount;
             };
 
             vertex VertexOut vertex_main(constant ImageParticle* particles [[buffer(0)]],
@@ -378,13 +439,20 @@ struct HologramMetalView: UIViewRepresentable {
                 float3 validColor = clamp(p.color / 255.0, 0.0, 1.0);
                 float  validOpacity = clamp(p.opacity, 0.0, 1.0);
                 
-                // Background hiding
-                if (uniforms.bgHide > 0.0) {
-                    float normalizedDepth = p.looseness;
-                    float fadeStart = 1.0 - uniforms.bgHide;
-                    float fadeEnd = 1.0;
-                    float fadeAmount = smoothstep(fadeStart, fadeEnd, normalizedDepth);
-                    validOpacity = validOpacity * (1.0 - fadeAmount);
+                // Background hiding with smoothstep between min/max using normalizedDepth
+                if (uniforms.bgMin < uniforms.bgMax) {
+                    // normalizedDepth < bgMin = visible (opacity = 1.0)
+                    // normalizedDepth > bgMax = hidden (opacity = 0.0)
+                    // Between = smooth transition
+                    float smoothstepValue = smoothstep(uniforms.bgMin, uniforms.bgMax, p.normalizedDepth);
+                    float visibilityAmount = 1.0 - smoothstepValue;
+                    validOpacity = validOpacity * visibilityAmount;
+
+                    // Debug logging for first few particles
+                    if (vertexID < 5) {
+                        // This will show in Metal debug output
+                        // normalizedDepth, bgMin, bgMax, smoothstepValue, visibilityAmount, finalOpacity
+                    }
                 }
                 
                 // Dissolve effect
@@ -397,13 +465,42 @@ struct HologramMetalView: UIViewRepresentable {
                 
                 float validSize = clamp(p.size, 0.0, 1.0);
                 float baseSize = 8.0 + (validSize * 32.0);
-                
+
                 if (p.category < 0.5)      baseSize *= 0.7;
                 else if (p.category < 1.5) baseSize *= 1.0;
                 else if (p.category < 2.5) baseSize *= 1.3;
                 else                       baseSize *= 1.6;
 
-                float finalSize = clamp(baseSize * (140.0 / viewZ) * uniforms.sizeMultiplier, 1.0, 200.0);
+                // Hash values for particle randomness
+                float particleRandom1 = fract(sin(dot(p.originalPosition.xy, float2(12.9898, 78.233))) * 43758.5453);
+                float particleRandom2 = fract(sin(dot(p.originalPosition.yx, float2(39.346, 11.135))) * 43758.5453);
+                float particleRandom3 = fract(sin(dot(p.originalPosition.xz, float2(93.989, 1.233))) * 43758.5453);
+
+                // Apply random size variation
+                float sizeVariation = 1.0;
+                if (uniforms.particleRandomSize > 0.0) {
+                    // Random size between 0.5x and 1.5x natural size
+                    float randomSizeFactor = 0.5 + particleRandom3 * 1.0; // 0.5 to 1.5
+                    sizeVariation = mix(1.0, randomSizeFactor, uniforms.particleRandomSize);
+                }
+
+                // Apply blink effect
+                float blinkAlpha = 1.0;
+                if (uniforms.particleBlink > 0.0) {
+                    // Random blink period between 0.5 and 5.0 seconds per particle
+                    float blinkPeriod = 0.5 + particleRandom1 * 4.5; // 0.5 to 5.0 seconds
+                    float blinkPhase = fmod(uniforms.time + particleRandom2 * 10.0, blinkPeriod) / blinkPeriod;
+                    float blinkPattern = smoothstep(0.0, 0.1, blinkPhase) * (1.0 - smoothstep(0.9, 1.0, blinkPhase));
+                    blinkAlpha = mix(1.0, blinkPattern, uniforms.particleBlink);
+                }
+
+                float finalSize = clamp(baseSize * sizeVariation * (140.0 / viewZ) * uniforms.sizeMultiplier, 1.0, 200.0);
+                validOpacity *= blinkAlpha; // Apply blink effect to opacity
+
+                // Hide particles with very low opacity from background hiding
+                if (validOpacity <= 0.001) {
+                    finalSize = 0.0;
+                }
 
                 if (!isfinite(clipPos.x) || !isfinite(clipPos.y) || !isfinite(clipPos.z)) {
                     finalSize = 0.0;
@@ -416,21 +513,29 @@ struct HologramMetalView: UIViewRepresentable {
                 out.color      = validColor;
                 out.opacity    = validOpacity;
                 out.category   = p.category;
-                out.looseness  = p.looseness;
+                out.normalizedDepth  = p.normalizedDepth;
+                out.glowAmount = uniforms.particleGlow;
                 return out;
             }
 
             fragment float4 fragment_main(VertexOut in [[stage_in]],
                                           constant Uniforms& uniforms [[buffer(0)]],
                                           float2 pointCoord [[point_coord]]) {
+                // Early discard for completely transparent particles to prevent occlusion
+                if (in.opacity <= 0.0) discard_fragment();
+
                 float2 uv = pointCoord - float2(0.5, 0.5);
                 float dist = length(uv);
 
-                float shapeAlpha = (dist < 0.5) ? 1.0 : 0.0;
+                // Apply glow effect: 0=sharp circles, 1=soft glow
+                float sharpAlpha = (dist < 0.5) ? 1.0 : 0.0;
+                float glowFalloff = 1.0 - smoothstep(0.0, 0.5, dist);
+                float shapeAlpha = mix(sharpAlpha, glowFalloff, in.glowAmount);
+
                 if (shapeAlpha < 0.1) discard_fragment();
 
                 float alpha = in.opacity * shapeAlpha;
-                if (alpha <= 0.01) discard_fragment();
+                if (alpha <= 0.005) discard_fragment();  // Lower threshold for better occlusion prevention
 
                 return float4(in.color, alpha);
             }
@@ -443,17 +548,22 @@ struct HologramMetalView: UIViewRepresentable {
                 float3 hologramPos = particle.originalPosition;
                 
                 // Depth scaling controlled by slider
-                float originalZ = particle.originalPosition.z;
-                float frontZ = 20.0;
-                float backZ = 80.0;
+                //float originalZ = particle.originalPosition.z;
+                //float frontZ = arcRadius;
+                //float backZ = arcRadius - particle.normalizedDepth * arcRadius;
                 
-                float normalizedDepth = (originalZ - frontZ) / (backZ - frontZ);
-                normalizedDepth = clamp(normalizedDepth, 0.0, 1.0);
+                //float normalizedDepth = (originalZ - frontZ) / (backZ - frontZ);
+                //normalizedDepth = clamp(normalizedDepth, 0.0, 1.0);
                 
-                // When depthScale = 0, all particles are on same plane (50.0)
-                // When depthScale != 0, particles spread based on depth mask
-                float depthOffset = normalizedDepth * uniforms.depthScale * 10.0;
-                hologramPos.z = 50.0 - depthOffset;
+                // Depth formula: arcRadius + (normalizedDepth * arcRadius * depthScale)
+                // arcRadius: base distance, normalizedDepth: 0=white(near), 1=black(far), depthScale: -1 to +1 controls distribution
+                // depthScale=0: flat plane at arcRadius, depthScale=+1: spread arcRadius to 2*arcRadius, depthScale=-1: reverse
+                hologramPos.z = uniforms.arcRadius + (particle.normalizedDepth * uniforms.arcRadius * uniforms.depthScale);
+
+                // Debug: ensure particles are visible (temporary logging for first few particles)
+                if (id < 5) {
+                    // This will be visible in Metal debug output
+                }
 
                 // Rotation
                 float3 orbitalCenter = float3(0.0, 0.0, 50.0);
@@ -478,12 +588,13 @@ struct HologramMetalView: UIViewRepresentable {
                 
                 // Wobble effect
                 if (uniforms.wobble > 0.0) {
-                    
-                    float time1 = uniforms.time + hash1 * 6.28;
-                    float time2 = uniforms.time + hash2 * 6.28;
-                    float time3 = uniforms.time + hash3 * 6.28;
-                    
-                    float wobbleAmount = uniforms.wobble * 10.0;
+
+                    float wobbleTime = uniforms.time * uniforms.wobbleSpeed;
+                    float time1 = wobbleTime + hash1 * 6.28;
+                    float time2 = wobbleTime + hash2 * 6.28;
+                    float time3 = wobbleTime + hash3 * 6.28;
+
+                    float wobbleAmount = uniforms.wobble * 200.0;
                     hologramPos.x += sin(time1 * 2.0) * wobbleAmount * hash1;
                     hologramPos.y += sin(time2 * 1.7) * wobbleAmount * hash2;
                     hologramPos.z += sin(time3 * 2.3) * wobbleAmount * hash3;
@@ -531,12 +642,13 @@ struct HologramMetalView: UIViewRepresentable {
 
                     hologramPos = arcPos;
 
-                    // Visible while in-flight; immune to bgHide
+                    // Visible while in-flight; but still respect background smoothstep
                     particle.size = 1.5;
-                    particle.looseness = 0.0;
+                    // Keep original normalizedDepth so emitting particles still respect smoothstep
+                    // particle.normalizedDepth = 0.0;  // REMOVED - was making particles immune to background hide
                 } else {
                     // Flight complete; fall back to normal hologram behavior
-                    particle.looseness = normalizedDepth;
+                    // Keep existing particle.normalizedDepth (set during particle creation)
                 }
                 particle.position = hologramPos;
 
@@ -574,10 +686,413 @@ struct HologramMetalView: UIViewRepresentable {
                 print("❌ Failed to create hologram shaders: \(error)")
             }
         }
-        
+
+        // MARK: - Remote Image Loading
+
+        func loadHologramFromURL(_ imageURL: String, targetCount: Int = 30000) {
+            print("[hologram] 🌐 Loading hologram from remote URL: \(imageURL)")
+
+            // Store current URL for rebuilds
+            currentImageURL = imageURL
+            currentImageData = nil // Clear cached image data since we're loading new URL
+            isUsingRemoteImage = true // Flag for compute shader control
+
+            guard let url = URL(string: imageURL) else {
+                print("[hologram] ❌ Invalid image URL: \(imageURL)")
+                return
+            }
+
+            // Generate mask URL by appending _mask to filename
+            let maskURL = generateMaskURL(from: imageURL)
+            print("[hologram] 🎭 Generated mask URL: \(maskURL)")
+            print("[hologram] 📝 Original URL: \(imageURL)")
+            print("[hologram] 📝 Mask URL: \(maskURL)")
+
+            // Download both images concurrently
+            let group = DispatchGroup()
+            var downloadedImage: UIImage?
+            var downloadedMask: UIImage?
+
+            // Download main image
+            group.enter()
+            downloadImage(from: url) { image in
+                downloadedImage = image
+                print("[hologram] \(image != nil ? "✅" : "❌") Main image download: \(image != nil ? "success" : "failed")")
+                group.leave()
+            }
+
+            // Download mask image
+            group.enter()
+            if let maskURLObj = URL(string: maskURL) {
+                downloadImage(from: maskURLObj) { image in
+                    downloadedMask = image
+                    print("[hologram] \(image != nil ? "✅" : "❌") Mask image download: \(image != nil ? "success" : "failed")")
+                    group.leave()
+                }
+            } else {
+                print("[hologram] ❌ Invalid mask URL: \(maskURL)")
+                group.leave()
+            }
+
+            // Process images when both downloads complete
+            group.notify(queue: .main) {
+                print("[hologram] 📊 Download results - Main: \(downloadedImage != nil), Mask: \(downloadedMask != nil)")
+
+                guard let originalImage = downloadedImage else {
+                    print("[hologram] ❌ Main image download failed for: \(imageURL)")
+                    print("[hologram] 🔄 Falling back to local images")
+                    self.loadParticlesFromImages(targetCount: targetCount)
+                    return
+                }
+
+                // If mask failed, use the main image as both color and mask
+                let maskImage = downloadedMask ?? originalImage
+                if downloadedMask == nil {
+                    print("[hologram] ⚠️ Mask download failed for: \(maskURL)")
+                    print("[hologram] 🎭 Using main image as mask (uniform depth)")
+                }
+
+                print("[hologram] 🎉 Processing downloaded image(s), creating particles...")
+                // Ensure particle generation happens on main thread for Metal operations
+                DispatchQueue.main.async {
+                    self.loadParticlesFromDownloadedImages(originalImage: originalImage, maskImage: maskImage, targetCount: targetCount)
+                }
+            }
+        }
+
+        private func generateMaskURL(from imageURL: String) -> String {
+            // Convert URL like "https://cdn.kilo.gallery/items/8r6i5n9r/txzad.png"
+            // to "https://cdn.kilo.gallery/items/8r6i5n9r/txzad_mask.png"
+            guard let url = URL(string: imageURL) else {
+                print("[hologram] ❌ Invalid URL for mask generation: \(imageURL)")
+                return imageURL
+            }
+
+            let pathExtension = url.pathExtension
+            let fileName = url.deletingPathExtension().lastPathComponent
+            let maskFileName = "\(fileName)_mask.\(pathExtension)"
+            let maskURL = url.deletingLastPathComponent().appendingPathComponent(maskFileName).absoluteString
+
+            return maskURL
+        }
+
+        private func downloadImage(from url: URL, completion: @escaping (UIImage?) -> Void) {
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 10.0 // 10 second timeout
+
+            print("[hologram] 📥 Starting download: \(url.absoluteString)")
+
+            URLSession.shared.dataTask(with: request) { data, response, error in
+                if let error = error {
+                    print("[hologram] ❌ Download error for \(url.absoluteString): \(error.localizedDescription)")
+                    completion(nil)
+                    return
+                }
+
+                if let httpResponse = response as? HTTPURLResponse {
+                    print("[hologram] 📡 HTTP \(httpResponse.statusCode) for \(url.absoluteString)")
+                    if httpResponse.statusCode != 200 {
+                        print("[hologram] ❌ HTTP error \(httpResponse.statusCode) for \(url.absoluteString)")
+                        completion(nil)
+                        return
+                    }
+                }
+
+                guard let data = data, let image = UIImage(data: data) else {
+                    print("[hologram] ❌ Failed to create image from downloaded data for \(url.absoluteString)")
+                    completion(nil)
+                    return
+                }
+
+                print("[hologram] ✅ Successfully downloaded image: \(url.absoluteString)")
+                completion(image)
+            }.resume()
+        }
+
+        private func generateParticlesFromPixelData(originalPixelData: [UInt8], depthPixelData: [UInt8], width: Int, height: Int, targetCount: Int) {
+            print("[hologram] 🎨 Generating particles from pixel data...")
+
+            // Validate input data
+            let expectedDataSize = width * height * 4
+            guard originalPixelData.count >= expectedDataSize && depthPixelData.count >= expectedDataSize else {
+                print("[hologram] ❌ Invalid pixel data size - original: \(originalPixelData.count), depth: \(depthPixelData.count), expected: \(expectedDataSize)")
+                return
+            }
+
+            let originalBytesPerRow = width * 4
+            let availablePixels = width * height
+
+            // Adjust target particles based on image size to prevent memory issues
+            // Relaxed from 64 to 16 pixels per particle for better visual quality
+            let maxSafeParticles = min(targetCount, availablePixels / 16) // 1 particle per 16 pixels (was 64)
+            let targetParticles = min(targetCount, maxSafeParticles)
+
+            let baseSampleRate = max(1, Int((Float(availablePixels) / Float(targetParticles)).squareRoot()))
+
+            // Memory usage calculation
+            let imageMemoryMB = Float(width * height * 8) / (1024 * 1024) // 8 bytes per pixel (2 images × 4 bytes)
+            let particleMemoryMB = Float(targetParticles * MemoryLayout<ImageParticle>.stride) / (1024 * 1024)
+
+            print("[hologram] 📐 Using sample rate: \(baseSampleRate)")
+            print("[hologram] 🎯 Target particles: \(targetParticles) (requested: \(targetCount), max safe: \(maxSafeParticles))")
+            print("[hologram] 💾 Image memory: \(String(format: "%.1f", imageMemoryMB))MB, Particle memory: \(String(format: "%.1f", particleMemoryMB))MB")
+            print("[hologram] 📐 Image size: \(width)×\(height) = \(availablePixels) pixels (1 particle per 16 pixels)")
+
+            if targetParticles < targetCount {
+                print("[hologram] ⚠️ Particle count reduced from \(targetCount) to \(targetParticles) for memory safety")
+            } else {
+                print("[hologram] ✅ Full particle count achieved: \(targetParticles) particles")
+            }
+            print("[hologram] 🔍 Starting particle processing...")
+            print("[hologram] 📊 Pixel data validation - original: \(originalPixelData.count) bytes, depth: \(depthPixelData.count) bytes")
+
+            var tempParticles: [ImageParticle] = []
+            var processedCount = 0
+            var rejectedCount = 0
+
+            for y in stride(from: 0, to: height, by: baseSampleRate) {
+                for x in stride(from: 0, to: width, by: baseSampleRate) {
+                    let pixelIndex = (y * originalBytesPerRow) + (x * 4)
+
+                    // Bounds checking to prevent buffer overruns
+                    guard pixelIndex + 3 < originalPixelData.count && pixelIndex + 3 < depthPixelData.count else {
+                        print("[hologram] ⚠️ Pixel index out of bounds: \(pixelIndex), max: \(originalPixelData.count)")
+                        continue
+                    }
+
+                    // Get original image RGB
+                    let r = Float(originalPixelData[pixelIndex]) / 255.0
+                    let g = Float(originalPixelData[pixelIndex + 1]) / 255.0
+                    let b = Float(originalPixelData[pixelIndex + 2]) / 255.0
+
+                    // Get depth value (use red channel of depth mask)
+                    // Invert so white=0 (near), black=1 (far)
+                    let depthValue = 1.0 - (Float(depthPixelData[pixelIndex]) / 255.0)
+
+                    // Position in world units (keep within ~±200 at zoom=1)
+                    let maxDimension = max(width, height)
+                    let scaleFactor = 400.0 / Float(maxDimension)
+                    let posX = Float(x - width/2) * scaleFactor
+                    let posY = Float(height/2 - y) * scaleFactor
+
+                    // Depth map: 20 (near) → 80 (far)
+                    let posZ = depthValue
+
+                    // Category from brightness
+                    let brightness = (r + g + b) / 3.0
+                    let category: Float = (brightness < 0.2) ? 0.0 : (brightness < 0.5) ? 1.0 : (brightness < 0.8) ? 2.0 : 3.0
+
+                    // Simple random emission seed - no need for complex hashing
+                    let emissionSeed = Float.random(in: 0...1)
+
+                    // Validate particle data to prevent GPU hangs
+                    let position = SIMD3<Float>(posX, posY, posZ)
+                    let color = SIMD3<Float>(r * 255, g * 255, b * 255)
+                    let size = 0.5 + depthValue * 2.0
+                    let pixelCoord = SIMD2<Float>(Float(x), Float(y))
+
+                    // Check for invalid values that could hang the GPU
+                    if !position.x.isFinite || !position.y.isFinite || !position.z.isFinite ||
+                       !color.x.isFinite || !color.y.isFinite || !color.z.isFinite ||
+                       !size.isFinite || !depthValue.isFinite ||
+                       !pixelCoord.x.isFinite || !pixelCoord.y.isFinite ||
+                       !emissionSeed.isFinite {
+
+                        rejectedCount += 1
+                        if rejectedCount <= 5 { // Only log first few rejections
+                            print("[hologram] ⚠️ Invalid particle \(rejectedCount) at (\(x),\(y)): pos=\(position), color=\(color), depth=\(depthValue)")
+                        }
+                        continue
+                    }
+
+                    tempParticles.append(
+                        ImageParticle(
+                            position: position,
+                            originalPosition: position,
+                            color: color,
+                            size: size,
+                            opacity: 1.0,
+                            category: category,
+                            normalizedDepth: depthValue,
+                            velocity: .zero,
+                            pixelCoord: pixelCoord,
+                            emissionSeed: emissionSeed
+                        )
+                    )
+
+                    processedCount += 1
+                    if processedCount % 5000 == 0 {
+                        print("[hologram] 📊 Processed \(processedCount) particles...")
+                    }
+                }
+            }
+
+            // Center point (average)
+            var sum = SIMD3<Float>(0,0,0)
+            for p in tempParticles { sum += p.position }
+            centerPoint = sum / Float(max(tempParticles.count, 1))
+
+            // Sort back-to-front (optional with depth test; harmless here)
+            tempParticles.sort { $0.position.z > $1.position.z }
+
+            // Calculate buffer size first
+            let tempParticleCount = tempParticles.count
+            let bufferSize = MemoryLayout<ImageParticle>.stride * tempParticleCount
+
+            // Validate buffer creation
+            guard bufferSize > 0 && tempParticleCount > 0 else {
+                print("[hologram] ❌ Invalid buffer parameters: size=\(bufferSize), count=\(tempParticleCount)")
+                return
+            }
+
+            // Ensure Metal operations happen on main thread and update atomically
+            DispatchQueue.main.async {
+                // Create new buffer first
+                guard let newParticleBuffer = self.device.makeBuffer(bytes: tempParticles, length: bufferSize, options: []) else {
+                    print("[hologram] ❌ Failed to create particle buffer")
+                    // Resume Metal view on failure
+                    self.mtkView?.isPaused = false
+                    return
+                }
+
+                // Pause Metal rendering during particle buffer update to prevent race conditions
+                print("[hologram] ⏸️ Pausing Metal view for atomic particle buffer update")
+                self.mtkView?.isPaused = true
+
+                // Only update state after successful buffer creation (atomic update)
+                self.particles = tempParticles
+                self.particleCount = tempParticleCount
+                self.particleBuffer = newParticleBuffer
+
+                if self.uniformBuffer == nil {
+                    self.uniformBuffer = self.device.makeBuffer(length: MemoryLayout<Uniforms>.stride, options: [])
+                }
+
+                // Update compute dispatch sizing for remote image particles
+                self.numThreadgroups = MTLSize(
+                    width: (self.particleCount + self.threadsPerGroup.width - 1) / self.threadsPerGroup.width,
+                    height: 1,
+                    depth: 1
+                )
+
+                print("[hologram] ✅ Generated \(self.particles.count) particles and updated GPU buffers")
+                print("[hologram] 📊 Buffer size: \(bufferSize) bytes, particle stride: \(MemoryLayout<ImageParticle>.stride)")
+                if rejectedCount > 0 {
+                    print("[hologram] ⚠️ Rejected \(rejectedCount) invalid particles during generation")
+                }
+
+                // Resume Metal rendering after successful buffer update
+                print("[hologram] ▶️ Resuming Metal view after particle buffer update")
+                self.mtkView?.isPaused = false
+            }
+        }
+
+        private func scaleImagesIfNeeded(originalImage: UIImage, maskImage: UIImage, maxDimension: Int) -> (UIImage, UIImage) {
+            let originalSize = originalImage.size
+            let maxDim = max(originalSize.width, originalSize.height)
+
+            if maxDim <= CGFloat(maxDimension) {
+                print("[hologram] 📏 Images are within size limit: \(Int(originalSize.width))×\(Int(originalSize.height))")
+                return (originalImage, maskImage)
+            }
+
+            // Calculate scale factor
+            let scaleFactor = CGFloat(maxDimension) / maxDim
+            let newWidth = Int(originalSize.width * scaleFactor)
+            let newHeight = Int(originalSize.height * scaleFactor)
+
+            print("[hologram] 📏 Scaling images from \(Int(originalSize.width))×\(Int(originalSize.height)) to \(newWidth)×\(newHeight)")
+
+            func scaleImage(_ image: UIImage, to size: CGSize) -> UIImage? {
+                UIGraphicsBeginImageContextWithOptions(size, false, 1.0)
+                defer { UIGraphicsEndImageContext() }
+                image.draw(in: CGRect(origin: .zero, size: size))
+                return UIGraphicsGetImageFromCurrentImageContext()
+            }
+
+            let newSize = CGSize(width: newWidth, height: newHeight)
+            guard let scaledOriginal = scaleImage(originalImage, to: newSize),
+                  let scaledMask = scaleImage(maskImage, to: newSize) else {
+                print("[hologram] ⚠️ Failed to scale images, using originals")
+                return (originalImage, maskImage)
+            }
+
+            return (scaledOriginal, scaledMask)
+        }
+
+        private func loadParticlesFromDownloadedImages(originalImage: UIImage, maskImage: UIImage, targetCount: Int = 30000) {
+            print("[hologram] 🎨 Processing downloaded images for particle generation...")
+
+            // Debug image properties
+            print("[hologram] 🔍 Original image - size: \(originalImage.size), scale: \(originalImage.scale)")
+            print("[hologram] 🔍 Mask image - size: \(maskImage.size), scale: \(maskImage.scale)")
+
+            // Check image size and potentially downscale
+            let maxDimension = 768 // Limit to reduce memory pressure
+            let (processedOriginal, processedMask) = scaleImagesIfNeeded(originalImage: originalImage, maskImage: maskImage, maxDimension: maxDimension)
+
+            // Store current image data for rebuilds (store processed versions)
+            currentImageData = (originalImage: processedOriginal, maskImage: processedMask)
+
+            guard let originalCGImage = processedOriginal.cgImage,
+                  let maskCGImage = processedMask.cgImage else {
+                print("[hologram] ❌ Failed to get CGImage from processed images")
+                loadTestPatternParticles(targetCount: targetCount)
+                return
+            }
+
+            // Debug CGImage properties
+            print("[hologram] 🔍 CGImage original - width: \(originalCGImage.width), height: \(originalCGImage.height)")
+            print("[hologram] 🔍 CGImage original - colorSpace: \(String(describing: originalCGImage.colorSpace?.name))")
+            print("[hologram] 🔍 CGImage original - bitsPerComponent: \(originalCGImage.bitsPerComponent), bitsPerPixel: \(originalCGImage.bitsPerPixel)")
+            print("[hologram] 🔍 CGImage mask - width: \(maskCGImage.width), height: \(maskCGImage.height)")
+            print("[hologram] 🔍 CGImage mask - colorSpace: \(String(describing: maskCGImage.colorSpace?.name))")
+
+            let width = originalCGImage.width
+            let height = originalCGImage.height
+            imageDimensions = SIMD2<Float>(Float(width), Float(height))
+            print("[hologram] 📷 Downloaded image dimensions: \(width)×\(height)")
+
+            // Create bitmap contexts for pixel data access with consistent color space
+            let originalBytesPerRow = width * 4
+            let depthBytesPerRow = width * 4
+            var originalPixelData = [UInt8](repeating: 0, count: height * originalBytesPerRow)
+            var depthPixelData = [UInt8](repeating: 0, count: height * depthBytesPerRow)
+
+            // Force sRGB color space for consistency
+            guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+                print("[hologram] ❌ Failed to create sRGB color space")
+                loadTestPatternParticles(targetCount: targetCount)
+                return
+            }
+
+            let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+
+            guard let originalContext = CGContext(data: &originalPixelData, width: width, height: height, bitsPerComponent: 8, bytesPerRow: originalBytesPerRow, space: colorSpace, bitmapInfo: bitmapInfo.rawValue),
+                  let depthContext = CGContext(data: &depthPixelData, width: width, height: height, bitsPerComponent: 8, bytesPerRow: depthBytesPerRow, space: colorSpace, bitmapInfo: bitmapInfo.rawValue) else {
+                print("[hologram] ❌ Failed to create bitmap contexts")
+                loadTestPatternParticles(targetCount: targetCount)
+                return
+            }
+
+            print("[hologram] 🎨 Created bitmap contexts with sRGB color space")
+
+            // Draw images into contexts
+            originalContext.draw(originalCGImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            depthContext.draw(maskCGImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+            // Generate particles from the downloaded images
+            generateParticlesFromPixelData(originalPixelData: originalPixelData, depthPixelData: depthPixelData, width: width, height: height, targetCount: targetCount)
+        }
+
         private func loadParticlesFromImages(targetCount: Int = 30000) {
-            print("📷 Loading hologram particles from images...")
-            
+            print("[hologram] 📷 Loading hologram particles from local images...")
+
+            // Clear remote image state since we're loading local images
+            currentImageURL = nil
+            currentImageData = nil
+            isUsingRemoteImage = false
+
             // Debug: List available resources
             if let resourcePath = Bundle.main.resourcePath {
                 print("🔍 Resource path: \(resourcePath)")
@@ -652,6 +1167,7 @@ struct HologramMetalView: UIViewRepresentable {
             
             var tempParticles: [ImageParticle] = []
             var processedCount = 0
+            var rejectedCount = 0
             
             for y in stride(from: 0, to: height, by: baseSampleRate) {
                 for x in stride(from: 0, to: width, by: baseSampleRate) {
@@ -663,7 +1179,8 @@ struct HologramMetalView: UIViewRepresentable {
                     let b = Float(originalPixelData[pixelIndex + 2]) / 255.0
                     
                     // Get depth value (use red channel of depth mask)
-                    let depthValue = Float(depthPixelData[pixelIndex]) / 255.0
+                    // Invert so white=0 (near), black=1 (far)
+                    let depthValue = 1.0 - (Float(depthPixelData[pixelIndex]) / 255.0)
                     
                     // Position in world units (keep within ~±200 at zoom=1)
                     let maxDimension = max(width, height)
@@ -672,7 +1189,7 @@ struct HologramMetalView: UIViewRepresentable {
                     let posY = Float(height/2 - y) * scaleFactor
                     
                     // Depth map: 20 (near) → 80 (far)
-                    let posZ = 20.0 + (1.0 - depthValue) * 60.0
+                    let posZ = depthValue
                     
                     // Category from brightness
                     let brightness = (r + g + b) / 3.0
@@ -681,18 +1198,38 @@ struct HologramMetalView: UIViewRepresentable {
                     // Simple random emission seed - no need for complex hashing
                     let emissionSeed = Float.random(in: 0...1)
 
+                    // Validate particle data to prevent GPU hangs
+                    let position = SIMD3<Float>(posX, posY, posZ)
+                    let color = SIMD3<Float>(r * 255, g * 255, b * 255)
+                    let size = 0.5 + depthValue * 2.0
+                    let pixelCoord = SIMD2<Float>(Float(x), Float(y))
+
+                    // Check for invalid values that could hang the GPU
+                    if !position.x.isFinite || !position.y.isFinite || !position.z.isFinite ||
+                       !color.x.isFinite || !color.y.isFinite || !color.z.isFinite ||
+                       !size.isFinite || !depthValue.isFinite ||
+                       !pixelCoord.x.isFinite || !pixelCoord.y.isFinite ||
+                       !emissionSeed.isFinite {
+
+                        rejectedCount += 1
+                        if rejectedCount <= 5 { // Only log first few rejections
+                            print("[hologram] ⚠️ Invalid particle \(rejectedCount) at (\(x),\(y)): pos=\(position), color=\(color), depth=\(depthValue)")
+                        }
+                        continue
+                    }
+
                     tempParticles.append(
                         ImageParticle(
-                            position: SIMD3<Float>(posX, posY, posZ),
-                            originalPosition: SIMD3<Float>(posX, posY, posZ),
-                            color: SIMD3<Float>(r * 255, g * 255, b * 255),
-                            size: 0.5 + depthValue * 2.0,
+                            position: position,
+                            originalPosition: position,
+                            color: color,
+                            size: size,
                             opacity: 1.0,
                             category: category,
-                            looseness: 0.0,
+                            normalizedDepth: depthValue,
                             velocity: .zero,
-                            pixelCoord: SIMD2<Float>(Float(x), Float(y)),
-                            emissionSeed: emissionSeed // Random seed for emission timing
+                            pixelCoord: pixelCoord,
+                            emissionSeed: emissionSeed
                         )
                     )
                     
@@ -710,13 +1247,9 @@ struct HologramMetalView: UIViewRepresentable {
             
             // Sort back-to-front (optional with depth test; harmless here)
             tempParticles.sort { $0.position.z > $1.position.z }
-            
-            // All particles are hologram particles with emission lifecycle
-            particles = tempParticles
-            particleCount = particles.count
 
             // Debug: Check depth distribution
-            let depths = particles.map { (($0.originalPosition.z - 20.0) / 60.0) } // Convert Z back to depth
+            let depths = tempParticles.map { (($0.originalPosition.z - 20.0) / 60.0) } // Convert Z back to depth
             let minDepth = depths.min() ?? 0
             let maxDepth = depths.max() ?? 0
             let avgDepth = depths.reduce(0, +) / Float(depths.count)
@@ -726,19 +1259,41 @@ struct HologramMetalView: UIViewRepresentable {
             let frontCount = depths.filter { $0 < 0.3 }.count
             let backCount = depths.filter { $0 > 0.7 }.count
             print("📊 Particle depth distribution: Front(\(frontCount)) vs Back(\(backCount))")
-            
-            // GPU buffers
-            let bufferSize = MemoryLayout<ImageParticle>.stride * particleCount
-            particleBuffer = device.makeBuffer(bytes: particles, length: bufferSize, options: [])
-            uniformBuffer = device.makeBuffer(length: MemoryLayout<Uniforms>.stride, options: [])
-            
-            // Compute dispatch sizing
-            numThreadgroups = MTLSize(
-                width: (particleCount + threadsPerGroup.width - 1) / threadsPerGroup.width,
-                height: 1,
-                depth: 1
-            )
-            print("✅ Buffers ready")
+
+            // Atomic update on main thread
+            DispatchQueue.main.async {
+                // Create GPU buffers first
+                let bufferSize = MemoryLayout<ImageParticle>.stride * tempParticles.count
+                guard let newParticleBuffer = self.device.makeBuffer(bytes: tempParticles, length: bufferSize, options: []),
+                      let newUniformBuffer = self.device.makeBuffer(length: MemoryLayout<Uniforms>.stride, options: []) else {
+                    print("[hologram] ❌ Failed to create GPU buffers for local images")
+                    // Resume Metal view on failure
+                    self.mtkView?.isPaused = false
+                    return
+                }
+
+                // Pause Metal rendering during particle buffer update to prevent race conditions
+                print("[hologram] ⏸️ Pausing Metal view for local image particle buffer update")
+                self.mtkView?.isPaused = true
+
+                // Update state atomically
+                self.particles = tempParticles
+                self.particleCount = tempParticles.count
+                self.particleBuffer = newParticleBuffer
+                self.uniformBuffer = newUniformBuffer
+
+                // Compute dispatch sizing
+                self.numThreadgroups = MTLSize(
+                    width: (self.particleCount + self.threadsPerGroup.width - 1) / self.threadsPerGroup.width,
+                    height: 1,
+                    depth: 1
+                )
+                print("✅ Buffers ready")
+
+                // Resume Metal rendering after successful buffer update
+                print("[hologram] ▶️ Resuming Metal view after local image particle buffer update")
+                self.mtkView?.isPaused = false
+            }
         }
         
         private func loadTestPatternParticles(targetCount: Int = 30000) {
@@ -771,7 +1326,7 @@ struct HologramMetalView: UIViewRepresentable {
                             size: 0.5 + sin(distance * 0.1) * 0.5,
                             opacity: 1.0,
                             category: Float(x % 4),
-                            looseness: 0.0,
+                            normalizedDepth: Float.random(in: 0...1), // Random depth for testing background hiding
                             velocity: .zero,
                             pixelCoord: SIMD2<Float>(Float(x), Float(y)),
                             emissionSeed: emissionSeed // Random seed for emission timing
@@ -779,24 +1334,42 @@ struct HologramMetalView: UIViewRepresentable {
                     )
                 }
             }
-            
-            // All particles are hologram particles with emission lifecycle
-            particles = tempParticles
-            particleCount = particles.count
-            
-            // Create GPU buffers
-            let bufferSize = MemoryLayout<ImageParticle>.stride * particleCount
-            particleBuffer = device.makeBuffer(bytes: particles, length: bufferSize, options: [])
-            uniformBuffer = device.makeBuffer(length: MemoryLayout<Uniforms>.stride, options: [])
-            
-            // Compute dispatch sizing
-            numThreadgroups = MTLSize(
-                width: (particleCount + threadsPerGroup.width - 1) / threadsPerGroup.width,
-                height: 1,
-                depth: 1
-            )
-            
-            print("✅ Created \(particleCount) test pattern particles")
+
+            // Atomic update on main thread
+            DispatchQueue.main.async {
+                // Create GPU buffers first
+                let bufferSize = MemoryLayout<ImageParticle>.stride * tempParticles.count
+                guard let newParticleBuffer = self.device.makeBuffer(bytes: tempParticles, length: bufferSize, options: []),
+                      let newUniformBuffer = self.device.makeBuffer(length: MemoryLayout<Uniforms>.stride, options: []) else {
+                    print("[hologram] ❌ Failed to create GPU buffers for test pattern")
+                    // Resume Metal view on failure
+                    self.mtkView?.isPaused = false
+                    return
+                }
+
+                // Pause Metal rendering during particle buffer update to prevent race conditions
+                print("[hologram] ⏸️ Pausing Metal view for test pattern particle buffer update")
+                self.mtkView?.isPaused = true
+
+                // Update state atomically
+                self.particles = tempParticles
+                self.particleCount = tempParticles.count
+                self.particleBuffer = newParticleBuffer
+                self.uniformBuffer = newUniformBuffer
+
+                // Compute dispatch sizing
+                self.numThreadgroups = MTLSize(
+                    width: (self.particleCount + self.threadsPerGroup.width - 1) / self.threadsPerGroup.width,
+                    height: 1,
+                    depth: 1
+                )
+
+                print("✅ Created \(self.particleCount) test pattern particles")
+
+                // Resume Metal rendering after successful buffer update
+                print("[hologram] ▶️ Resuming Metal view after test pattern particle buffer update")
+                self.mtkView?.isPaused = false
+            }
         }
         
         private func setupGestures() {
@@ -909,18 +1482,34 @@ struct HologramMetalView: UIViewRepresentable {
                   let particleBuffer = particleBuffer,
                   let renderPipelineState = renderPipelineState,
                   let physicsComputePipelineState = physicsComputePipelineState,
-                  let depthStencilState = depthStencilState else { 
-                return 
+                  let depthStencilState = depthStencilState else {
+                return
+            }
+
+            // Validate buffer/count consistency to prevent GPU faults
+            let expectedBufferSize = MemoryLayout<ImageParticle>.stride * particleCount
+            if particleBuffer.length < expectedBufferSize {
+                print("[hologram] ⚠️ Buffer/count mismatch: buffer=\(particleBuffer.length), expected=\(expectedBufferSize), count=\(particleCount)")
+                return
+            }
+
+            // Additional safety check
+            guard particleCount > 0 && particleCount <= particles.count else {
+                print("[hologram] ⚠️ Invalid particle count: \(particleCount), particles array: \(particles.count)")
+                return
             }
             
             // Update animation
             time += 1.0 / 60.0
-            rotation += rotSpeed * 0.01
-            if rotation > 2 * .pi { rotation -= 2 * .pi }
+            // Pause rotation in globe mode - keep our side facing us
+            if !isInGlobeMode {
+                rotation += rotSpeed * 0.01
+                if rotation > 2 * .pi { rotation -= 2 * .pi }
+            }
             
             // Setup camera matrices
             let aspect = Float(view.drawableSize.width / max(view.drawableSize.height, 1))
-            let proj = perspectiveRH(fovyRadians: 45.0 * .pi / 180.0, aspect: aspect, near: 0.1, far: 2000.0)
+            let proj = perspectiveRH(fovyRadians: 45.0 * .pi / 180.0, aspect: aspect, near: 1.0, far: 2000.0)
             
             let zoomedCameraEye = SIMD3<Float>(cameraEye.x, cameraEye.y, cameraEye.z / zoom)
             let viewM = lookAtRH(eye: zoomedCameraEye, center: cameraCenter, up: cameraUp)
@@ -996,7 +1585,7 @@ struct HologramMetalView: UIViewRepresentable {
                 puckWorldPos = SIMD3<Float>(hit.x, hit.y, planeZ)
             }
 
-            print("🎯 Puck conversion: screenPoints=\(puckPoints) → localPixels=\(puckLocalPixels) → NDC=(\(ndcX),\(ndcY)) → worldPos=\(puckWorldPos)")
+            // print("🎯 Puck conversion: screenPoints=\(puckPoints) → localPixels=\(puckLocalPixels) → NDC=(\(ndcX),\(ndcY)) → worldPos=\(puckWorldPos)")
 
             // 6) Fill uniforms with this *unprojected* world position
             var uniforms = Uniforms(
@@ -1007,9 +1596,12 @@ struct HologramMetalView: UIViewRepresentable {
                 sizeMultiplier: sizeMultiplier,
                 zoom: zoom,
                 depthScale: depthScale,
-                bgHide: bgHide,
+                bgMin: bgMin,
+                bgMax: bgMax,
+                arcRadius: arcRadius,
                 dissolve: dissolve,
                 wobble: wobble,
+                wobbleSpeed: wobbleSpeed,
                 yOffset: yOffset,
                 centerPoint: SIMD4<Float>(centerPoint.x, centerPoint.y, centerPoint.z, 0),
                 imageDimensions: imageDimensions,
@@ -1019,19 +1611,33 @@ struct HologramMetalView: UIViewRepresentable {
                 emissionDensity: emissionDensity,          // now arrives correctly
                 emissionPeriodSec: emissionPeriodSec,
                 travelTimeSec: travelTimeSec,
-                arcHeight: arcHeight
+                arcHeight: arcHeight,
+                particleBlink: particleBlink,
+                particleRandomSize: particleRandomSize,
+                particleGlow: particleGlow
             )
+
+            // Debug logging for background hiding values being sent to shader
+            if Int(time * 10) % 300 == 0 { // Log once per 30 seconds instead of every second
+                print("[emission] 🎭 Uniforms bgMin=\(uniforms.bgMin), bgMax=\(uniforms.bgMax), emissionDensity=\(uniforms.emissionDensity)")
+            }
+
             uniformBuffer.contents().copyMemory(from: &uniforms, byteCount: MemoryLayout<Uniforms>.size)
             
             let commandBuffer = commandQueue.makeCommandBuffer()!
             
-            // Run compute shader for physics
-            if let computeEncoder = commandBuffer.makeComputeCommandEncoder() {
-                computeEncoder.setComputePipelineState(physicsComputePipelineState)
-                computeEncoder.setBuffer(particleBuffer, offset: 0, index: 0)
-                computeEncoder.setBuffer(uniformBuffer, offset: 0, index: 1)
-                computeEncoder.dispatchThreadgroups(numThreadgroups, threadsPerThreadgroup: threadsPerGroup)
-                computeEncoder.endEncoding()
+            // Run compute shader for physics with validation
+            // Fixed: Remote images now properly update numThreadgroups
+            let shouldRunComputeShader = true
+
+            if shouldRunComputeShader {
+                if let computeEncoder = commandBuffer.makeComputeCommandEncoder() {
+                    computeEncoder.setComputePipelineState(physicsComputePipelineState)
+                    computeEncoder.setBuffer(particleBuffer, offset: 0, index: 0)
+                    computeEncoder.setBuffer(uniformBuffer, offset: 0, index: 1)
+                    computeEncoder.dispatchThreadgroups(numThreadgroups, threadsPerThreadgroup: threadsPerGroup)
+                    computeEncoder.endEncoding()
+                }
             }
             
             // Render particles
