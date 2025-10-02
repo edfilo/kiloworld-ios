@@ -41,8 +41,12 @@ final class SkyGateRecognizer: UIGestureRecognizer {
     
     // Method to update the hologram coordinator after initialization
     func updateHologramCoordinator(_ coordinator: AnyObject?) {
+        print("[hologramcoordinator] 🌌 SkyGateRecognizer.updateHologramCoordinator called with: \(coordinator != nil ? "✅" : "❌")")
+        if let coord = coordinator {
+            print("[hologramcoordinator] 🌌 Coordinator type: \(type(of: coord))")
+        }
         self.hologramCoordinator = coordinator
-        print("[map] 🌌 SkyGateRecognizer hologram coordinator updated: \(coordinator != nil ? "✅" : "❌")")
+        print("[hologramcoordinator] 🌌 SkyGateRecognizer hologram coordinator stored: \(self.hologramCoordinator != nil ? "✅" : "❌")")
     }
     
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -53,64 +57,77 @@ final class SkyGateRecognizer: UIGestureRecognizer {
         
         guard let view = self.view else { return }
         
+        guard let mapView = view as? MapView else { return }
+
+        // Query rendered features for each touch point to detect sky
+        let r: CGFloat = 4
+        let group = DispatchGroup()
+        var touchResults: [UITouch: Bool] = [:] // touch -> isSky
+
         for touch in touches {
             let location = touch.location(in: view)
-            
-            // Check if touch is in "sky" area (upper 40% of screen)
-            let skyThreshold = view.bounds.height * 0.4
-            
-            if location.y <= skyThreshold {
-                print("[map] 🌌 SKY TOUCH detected at y=\(location.y) (threshold=\(skyThreshold))")
-                
-                activeTouches.insert(touch)
-                
-                // Start synth note if synth is available
-                if let metalSynth = metalSynth {
-                    let noteNumber = calculateNoteFromPosition(location, in: view)
-                    
-                    // Find an available voice or use polyphonic allocation
-                    let voiceIndex = metalSynth.findAvailableVoice() ?? 0
-                    
-                    metalSynth.noteOnWithVoice(voiceIndex: voiceIndex, noteNumber: noteNumber, velocity: 0.7, wavetablePosition: Float(location.x / view.bounds.width))
-                    synthNotes[touch] = noteNumber
-                    touchVoices[touch] = voiceIndex
-                    print("[map] 🎵 Started note \(noteNumber) on voice \(voiceIndex) for sky touch with synth: ✅")
-                } else {
-                    print("[map] ❌ No metalSynth available for sky touch!")
+            let rect = CGRect(x: location.x - r, y: location.y - r, width: r*2, height: r*2)
+
+            group.enter()
+            mapView.mapboxMap.queryRenderedFeatures(
+                with: rect,
+                options: nil
+            ) { result in
+                if case .success(let hits) = result {
+                    touchResults[touch] = hits.isEmpty // Empty = sky
                 }
-                
-                // Control hologram if available
-                if let hologramCoordinator = hologramCoordinator {
-                    // Use perform selector to call the method without direct import
-                    if hologramCoordinator.responds(to: Selector(("onSkyTouchBegan:in:"))) {
-                        hologramCoordinator.perform(Selector(("onSkyTouchBegan:in:")), with: NSValue(cgPoint: location), with: view)
-                        print("[map] 🌌 Triggered hologram sky touch began")
-                    }
-                }
-                
-                // Block ALL gestures and events when in sky - no map activity at all
-                self.state = .began
-                
-                // Cancel the touch event entirely to prevent any map/location updates
-                self.cancelsTouchesInView = true
-                
-            } else {
-                print("[map] 🗺️ GROUND TOUCH detected at y=\(location.y) (threshold=\(skyThreshold))")
-                // Allow map touches to pass through normally
-                self.cancelsTouchesInView = false
-                if let event = event {
-                    self.ignore(touch, for: event)
-                }
+                group.leave()
             }
         }
-        
-        // Update touch count
-        onSkyTouchCountChanged?(activeTouches.count)
-        
-        if activeTouches.isEmpty {
-            // No sky touches, fail the recognizer to allow map gestures
-            self.state = .failed
-            self.cancelsTouchesInView = false
+
+        group.notify(queue: .main) { [weak self] in
+            guard let self = self else { return }
+
+            for (touch, isSky) in touchResults {
+                let location = touch.location(in: view)
+
+                if isSky {
+                    print("[map] 🌌 SKY TOUCH at \(location)")
+
+                    self.activeTouches.insert(touch)
+
+                    // Start synth note if synth is available
+                    if let metalSynth = self.metalSynth {
+                        let noteNumber = self.calculateNoteFromPosition(location, in: view)
+                        let voiceIndex = metalSynth.findAvailableVoice() ?? 0
+                        metalSynth.noteOnWithVoice(voiceIndex: voiceIndex, noteNumber: noteNumber, velocity: 0.7, wavetablePosition: Float(location.x / view.bounds.width))
+                        self.synthNotes[touch] = noteNumber
+                        self.touchVoices[touch] = voiceIndex
+                    }
+
+                    // Control hologram if available
+                    if let hologramCoordinator = self.hologramCoordinator {
+                        let selector = Selector(("onSkyTouchBegan:in:"))
+                        if hologramCoordinator.responds(to: selector) {
+                            hologramCoordinator.perform(selector, with: NSValue(cgPoint: location), with: view)
+                        }
+                    }
+
+                    // Block gestures when in sky
+                    self.state = .began
+                    self.cancelsTouchesInView = true
+
+                } else {
+                    // Allow map touches to pass through
+                    self.cancelsTouchesInView = false
+                    if let event = event {
+                        self.ignore(touch, for: event)
+                    }
+                }
+            }
+
+            // Update touch count
+            self.onSkyTouchCountChanged?(self.activeTouches.count)
+
+            if self.activeTouches.isEmpty {
+                self.state = .failed
+                self.cancelsTouchesInView = false
+            }
         }
     }
     

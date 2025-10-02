@@ -52,6 +52,11 @@ struct Uniforms {
     var particleBlink: Float              // Blink rate: 0=no blink, 1=random blink
     var particleRandomSize: Float         // Size variation: 0=uniform, 1=varied
     var particleGlow: Float               // Glow effect: 0=sharp circles, 1=soft glow
+    var touchPositionWorld: SIMD4<Float>  // Touch position in world space
+    var touchRadius: Float                // Influence radius
+    var touchStrength: Float              // Force strength
+    var _padB: Float = 0                  // pad to 16B boundary
+    var _padC: Float = 0
 }
 
 struct HologramMetalView: UIViewRepresentable {
@@ -116,6 +121,11 @@ struct HologramMetalView: UIViewRepresentable {
         private var currentImageURL: String?
         private var currentImageData: (originalImage: UIImage, maskImage: UIImage)?
         private var isUsingRemoteImage: Bool = false
+
+        // Touch disturbance tracking
+        private var touchPositionWorld = SIMD3<Float>(0, 0, 0)
+        private var touchRadius: Float = 500.0  // Default radius in world units
+        private var touchStrength: Float = 0.0  // 0 when not touching, >0 when active
         
         // Animation parameters
         private var time: Float = 0
@@ -210,7 +220,62 @@ struct HologramMetalView: UIViewRepresentable {
         func setMetalSynth(_ synth: MetalWavetableSynth?) {
             metalSynth = synth
         }
-        
+
+        func updateTouch(screenPoint: CGPoint?, mtkView: MTKView) {
+            guard let screenPoint = screenPoint else {
+                // No touch - decay strength
+                touchStrength = 0.0
+                print("[touch] 💨 Touch cleared, strength=0")
+                return
+            }
+
+            // Use same conversion pipeline as puck position
+            // 1) Convert to pixels
+            let scale = mtkView.window?.screen.scale ?? mtkView.contentScaleFactor
+            let pixelX = screenPoint.x * scale
+            let pixelY = screenPoint.y * scale
+
+            // 2) Pixels → NDC using drawableSize
+            let dw = max(mtkView.drawableSize.width, 1)
+            let dh = max(mtkView.drawableSize.height, 1)
+            let ndcX = Float((pixelX / dw) * 2.0 - 1.0)
+            let ndcY = Float(1.0 - (pixelY / dh) * 2.0)
+
+            // 3) Place at hologram's Z depth (50.0 + yOffset)
+            let planeZ: Float = 50.0 + yOffset
+
+            // Simple approximation - scale NDC by reasonable world-space factor
+            // This assumes orthographic-like behavior at the hologram depth
+            let worldScale: Float = 1000.0
+            touchPositionWorld = SIMD3<Float>(ndcX * worldScale, ndcY * worldScale, planeZ)
+            touchStrength = 1.0
+            print("[touch] 🎯 Touch world pos: \(touchPositionWorld), strength=1.0, radius=\(touchRadius)")
+        }
+
+        // MARK: - Objective-C exposed methods for SkyGateRecognizer
+        @objc(onSkyTouchBegan:in:)
+        func onSkyTouchBegan(_ location: NSValue, in view: UIView) {
+            guard let mtkView = mtkView else { return }
+            let point = location.cgPointValue
+            print("[touch] 🌌 Sky touch began at \(point)")
+            updateTouch(screenPoint: point, mtkView: mtkView)
+        }
+
+        @objc(onSkyTouchMoved:in:)
+        func onSkyTouchMoved(_ location: NSValue, in view: UIView) {
+            guard let mtkView = mtkView else { return }
+            let point = location.cgPointValue
+            print("[touch] 🌌 Sky touch moved to \(point)")
+            updateTouch(screenPoint: point, mtkView: mtkView)
+        }
+
+        @objc(onSkyTouchEnded)
+        func onSkyTouchEnded() {
+            guard let mtkView = mtkView else { return }
+            print("[touch] 🌌 Sky touch ended")
+            updateTouch(screenPoint: nil, mtkView: mtkView)
+        }
+
         func updateHologramSettings(_ settings: UserSettings) {
             rotation = settings.hologramRotation
             rotSpeed = settings.hologramRotSpeed
@@ -308,44 +373,7 @@ struct HologramMetalView: UIViewRepresentable {
                 self.particleBuffer = device.makeBuffer(bytes: particles, length: bufferSize, options: [])
             }
         }
-        
-        // MARK: - SkyGate Control Methods
-        
-        @objc func onSkyTouchBegan(_ locationValue: NSValue, in view: UIView) {
-            let location = locationValue.cgPointValue
-            // Convert touch location to hologram control parameters
-            let x = Float(location.x / view.bounds.width)
-            let y = Float(location.y / view.bounds.height)
-            
-            // Control hologram parameters based on touch position
-            wobble = y * 0.5 // Y controls wobble intensity
-            rotSpeed = x * 2.0 + 0.5 // X controls rotation speed
-            
-            print("🌌 Hologram: Sky touch began - wobble: \(wobble), rotSpeed: \(rotSpeed)")
-        }
-        
-        @objc func onSkyTouchMoved(_ locationValue: NSValue, in view: UIView) {
-            let location = locationValue.cgPointValue
-            let x = Float(location.x / view.bounds.width)
-            let y = Float(location.y / view.bounds.height)
-            
-            // Update hologram parameters as touch moves
-            wobble = y * 0.5
-            rotSpeed = x * 2.0 + 0.5
-            dissolve = sin(time * 2.0) * 0.2 + 0.3 // Add dynamic dissolve effect
-        }
-        
-        @objc func onSkyTouchEnded() {
-            // Gradually return to normal state
-            wobble *= 0.8
-            if wobble < 0.05 { wobble = 0.0 }
-            
-            rotSpeed = 0.6 // Return to default rotation speed
-            dissolve = 0.0 // Clear dissolve effect
-            
-            print("🌌 Hologram: Sky touch ended - returning to normal")
-        }
-        
+
         private func setupMetal() {
             // Create depth stencil state
             let depthDescriptor = MTLDepthStencilDescriptor()
@@ -398,6 +426,11 @@ struct HologramMetalView: UIViewRepresentable {
                 float    particleBlink;
                 float    particleRandomSize;
                 float    particleGlow;
+                float4   touchPositionWorld;
+                float    touchRadius;
+                float    touchStrength;
+                float    _padB;
+                float    _padC;
             };
 
             struct VertexOut {
@@ -586,6 +619,26 @@ struct HologramMetalView: UIViewRepresentable {
                     hologramPos.y += sin(time2 * 1.7) * wobbleAmount * hash2;
                     hologramPos.z += sin(time3 * 2.3) * wobbleAmount * hash3;
                 }
+
+                // Touch disturbance - particles pushed away from touch point with spring-back
+                if (uniforms.touchStrength > 0.0) {
+                    float3 toTouch = hologramPos - uniforms.touchPositionWorld.xyz;
+                    float dist = length(toTouch);
+
+                    if (dist < uniforms.touchRadius && dist > 0.01) {
+                        // Calculate repulsion force with squared falloff for smooth feel
+                        float normalizedDist = dist / uniforms.touchRadius;
+                        float force = (1.0 - normalizedDist) * (1.0 - normalizedDist);
+
+                        // Push particles away from touch point
+                        float3 pushDir = normalize(toTouch);
+                        particle.velocity += pushDir * force * uniforms.touchStrength * 10.0;
+                    }
+                }
+
+                // Apply velocity with damping (spring-back to original position)
+                hologramPos += particle.velocity;
+                particle.velocity *= 0.92; // Damping - particles drift back to original position
 
                 // === Target in-flight fraction model ======================================
                 // Let emissionDensity be the target fraction of particles in flight (0..0.1).
@@ -1361,10 +1414,10 @@ struct HologramMetalView: UIViewRepresentable {
         
         private func setupGestures() {
             guard let view = mtkView else { return }
-            
+
             let pinchGesture = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
             let panGesture = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
-            
+
             view.addGestureRecognizer(pinchGesture)
             view.addGestureRecognizer(panGesture)
         }
@@ -1384,7 +1437,7 @@ struct HologramMetalView: UIViewRepresentable {
                 gesture.setTranslation(.zero, in: gesture.view)
             }
         }
-        
+
         // Touch handling for synthesis
         func handleTouchesBegan(_ touches: Set<UITouch>, with event: UIEvent?, in view: UIView) {
             for touch in touches {
@@ -1575,6 +1628,10 @@ struct HologramMetalView: UIViewRepresentable {
             // print("🎯 Puck conversion: screenPoints=\(puckPoints) → localPixels=\(puckLocalPixels) → NDC=(\(ndcX),\(ndcY)) → worldPos=\(puckWorldPos)")
 
             // 6) Fill uniforms with this *unprojected* world position
+            // Compensate yOffset for zoom so particles stay at consistent screen height
+            // When zoom increases (particles closer), divide yOffset to keep same visual position
+            let zoomCompensatedYOffset = yOffset / max(zoom, 0.01)
+
             var uniforms = Uniforms(
                 mvpMatrix: proj * viewM,
                 viewMatrix: viewM,
@@ -1589,7 +1646,7 @@ struct HologramMetalView: UIViewRepresentable {
                 dissolve: dissolve,
                 wobble: wobble,
                 wobbleSpeed: wobbleSpeed,
-                yOffset: yOffset,
+                yOffset: zoomCompensatedYOffset,
                 centerPoint: SIMD4<Float>(centerPoint.x, centerPoint.y, centerPoint.z, 0),
                 imageDimensions: imageDimensions,
                 aspectRatio: aspect,
@@ -1601,8 +1658,13 @@ struct HologramMetalView: UIViewRepresentable {
                 arcHeight: arcHeight,
                 particleBlink: particleBlink,
                 particleRandomSize: particleRandomSize,
-                particleGlow: particleGlow
+                particleGlow: particleGlow,
+                touchPositionWorld: SIMD4<Float>(touchPositionWorld.x, touchPositionWorld.y, touchPositionWorld.z, 0),
+                touchRadius: touchRadius,
+                touchStrength: touchStrength
             )
+
+            // Removed verbose touch logging
 
             // Debug logging for background hiding values being sent to shader
             if Int(time * 10) % 300 == 0 { // Log once per 30 seconds instead of every second

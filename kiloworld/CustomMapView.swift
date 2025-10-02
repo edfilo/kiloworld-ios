@@ -134,6 +134,12 @@ struct CustomMapView: UIViewRepresentable {
             // Set up SkyGateRecognizer
             DispatchQueue.main.async {
                 context.coordinator.setupSkyGateRecognizer(mapView: mapView, metalSynth: metalSynth, onSkyTouchCountChanged: onSkyTouchCountChanged, hologramCoordinator: hologramCoordinator)
+
+                // Update hologram coordinator again in case it was created before SkyGate
+                if let hologramCoord = hologramCoordinator {
+                    print("[hologramcoordinator] 🔄 Updating SkyGate with hologram coordinator after setup")
+                    context.coordinator.updateSkyGateHologramCoordinator(hologramCoord)
+                }
             }
 
             // Set up camera observer for debug panel updates and auto-center reset
@@ -200,6 +206,7 @@ struct CustomMapView: UIViewRepresentable {
         var styleObserver: Cancelable?
         var cameraObserver: Cancelable?
         weak var skyGateRecognizer: SkyGateRecognizer?
+        weak var pendingHologramCoordinator: AnyObject? // Store hologram coordinator if it arrives before SkyGate is ready
         var lastCameraState: CameraState?
         var dynamicTopPadding: Double = 200.0 // Store dynamic top padding value
         var dynamicBottomPadding: Double = 0.0 // Store dynamic bottom padding value
@@ -250,34 +257,42 @@ struct CustomMapView: UIViewRepresentable {
             pathLayer.lineBlur = .constant(0.0) // Remove blur for maximum contrast
 
             try? mapView.mapboxMap.addSource(source)
-            try? mapView.mapboxMap.addLayer(pathLayer, layerPosition: .above("neon-road-labels")) // Above all roads and labels
-            
+            try? mapView.mapboxMap.addLayer(pathLayer, layerPosition: .default) // Top of all layers
+
             // Journey path updated (\(path.count) points)
         }
          
         
         /// ✅ KEEP: Essential for SkyGate touch interaction system
         func setupSkyGateRecognizer(mapView: MapView?, metalSynth: MetalWavetableSynth?, onSkyTouchCountChanged: @escaping (Int) -> Void, hologramCoordinator: AnyObject?) {
-            guard let mapView = mapView else { 
+            guard let mapView = mapView else {
                 print("[map] ❌ No mapView for SkyGateRecognizer")
-                return 
+                return
             }
-            
-            print("[map] 🚪 Setting up SkyGateRecognizer with metalSynth: \(metalSynth != nil ? "✅" : "❌")")
-            
+
+            print("[hologramcoordinator] 🚪 Setting up SkyGateRecognizer with metalSynth: \(metalSynth != nil ? "✅" : "❌"), hologramCoordinator: \(hologramCoordinator != nil ? "✅" : "❌")")
+
             // Remove any existing SkyGateRecognizer first
             mapView.gestureRecognizers?.forEach { recognizer in
                 if recognizer is SkyGateRecognizer {
                     mapView.removeGestureRecognizer(recognizer)
-                    print("[map] 🗑️ Removed old SkyGateRecognizer")
+                    print("[hologramcoordinator] 🗑️ Removed old SkyGateRecognizer")
                 }
             }
-            
+
             let gate = SkyGateRecognizer(mapLoaded: mapView as AnyObject, metalSynth: metalSynth, onSkyTouchCountChanged: onSkyTouchCountChanged)
             self.skyGateRecognizer = gate  // Keep reference for later updates
-            
-            // Set up hologram coordinator
-            gate.updateHologramCoordinator(hologramCoordinator)
+
+            // Set up hologram coordinator - check both parameter and pending
+            let coordToUse = hologramCoordinator ?? pendingHologramCoordinator
+            print("[hologramcoordinator] 🔄 Setting hologram coordinator on SkyGate: \(coordToUse != nil ? "✅" : "❌")")
+            if coordToUse != nil {
+                print("[hologramcoordinator] 🔄 Source: \(hologramCoordinator != nil ? "parameter" : "pending")")
+            }
+            gate.updateHologramCoordinator(coordToUse)
+            if coordToUse != nil {
+                pendingHologramCoordinator = nil // Clear pending since we used it
+            }
             
             // Configure Mapbox gesture recognizers to require SkyGate to fail BEFORE adding SkyGate
             let recognizers = mapView.gestureRecognizers ?? []
@@ -304,8 +319,21 @@ struct CustomMapView: UIViewRepresentable {
         func updateSkyGateSynth(_ metalSynth: MetalWavetableSynth?) {
             skyGateRecognizer?.updateMetalSynth(metalSynth)
         }
-        
-        
+
+        func updateSkyGateHologramCoordinator(_ coordinator: AnyObject) {
+            print("[hologramcoordinator] 🔄 updateSkyGateHologramCoordinator called with: \(coordinator)")
+            print("[hologramcoordinator] 🔄 skyGateRecognizer exists: \(skyGateRecognizer != nil ? "✅" : "❌")")
+            if let gate = skyGateRecognizer {
+                gate.updateHologramCoordinator(coordinator)
+                print("[hologramcoordinator] 🔄 Updated SkyGate hologram coordinator")
+                pendingHologramCoordinator = nil // Clear pending since we just set it
+            } else {
+                print("[hologramcoordinator] ⚠️ No skyGateRecognizer yet, storing as pending")
+                pendingHologramCoordinator = coordinator
+            }
+        }
+
+
         /// ✅ KEEP: Essential for compass-based map rotation
         func updateBearing(_ bearing: Double, userLocation: CLLocationCoordinate2D) {
             //print("[map] 🧭 Updating map bearing to: \(String(format: "%.1f", bearing))°")
@@ -839,41 +867,17 @@ private final class NeonGridStyler {
         let clampedWidth = max(0.02, min(2.0, horizonWidth))
         let startKm = Double(userSettings?.horizonStart ?? 2.0)       // how close the band begins (km)
 
-        print("[NEON] 🔍 HORIZON DEBUG: userSettings?.horizonStart = \(userSettings?.horizonStart ?? -999)")
-        print("[NEON] 🔍 HORIZON DEBUG: startKm = \(startKm)")
-        print("[NEON] 🔍 HORIZON DEBUG: horizonWidth = \(horizonWidth)")
-        print("[NEON] 🔍 HORIZON DEBUG: clampedWidth = \(clampedWidth)")
-        print("[NEON] 🔍 HORIZON DEBUG: final range = [\(startKm), \(startKm + clampedWidth)]")
-
-        // TEMPORARILY COMMENTED OUT ATMOSPHERE TO TEST WHITE LAND ISSUE
-        
         var atm = Atmosphere()
-        // A thin band close to the camera: [start, start + width]
         atm.range = .constant([startKm, startKm + clampedWidth])
-        // Feather controls softness; small = crisper horizon
         let feather = Double(userSettings?.horizonFeather ?? 0.06)
         atm.horizonBlend = .constant(max(0.0, min(0.06, feather)))
-        // Slightly lower alpha so the band doesn't overpower the ground edge
-        atm.color = .constant(StyleColor(UIColor(red: 0.86, green: 0.36, blue: 0.12, alpha: 0.0))) // DISABLED: was 0.65
+        atm.color = .constant(StyleColor(UIColor(red: 0.86, green: 0.36, blue: 0.12, alpha: 0.0)))
         atm.highColor = .constant(StyleColor(.black))
         atm.spaceColor = .constant(StyleColor(.black))
         atm.starIntensity = .constant(1.0)
-
         try? style.setAtmosphere(atm)
-        print("[NEON] 🟠 Horizon start=\(startKm) km, width=\(clampedWidth) km, feather=\(feather)")
-        
-        print("[NEON] ⚠️ ATMOSPHERE TEMPORARILY DISABLED FOR TESTING")
 
-        // Land layer will be styled below with background-color (it's a background type layer)
-        print("[NEON] 🔍 Land layer will be styled as background layer (not fill)")
-
-        // Double-lined roads like the mockup
-        print("[NEON] 🛣️ Adding double-lined roads above land/water...")
-
-        // Log all available layers and classes once
         logAllLayersAndClasses(style: mapView.mapboxMap)
-
-        // Debug land-related layers specifically
         debugLandLayers(style: mapView.mapboxMap)
 
         // Roads outer glow (widest layer for soft glow)
@@ -886,7 +890,6 @@ private final class NeonGridStyler {
         roadsGlow.lineOpacity = .expression(opacityExp(min: 0.0, max: 0.30))  // Fade in from 0
         roadsGlow.lineBlur = .constant(10.0)
         try? style.addLayer(roadsGlow, layerPosition: .above("land"))
-        print("[NEON] ✨ roads-glow (outer) added")
 
         // Roads main line (bright orange outer line)
         var roadsOuter = LineLayer(id: roadsCoreId, source: streetsSourceId)
@@ -904,7 +907,6 @@ private final class NeonGridStyler {
         })
         roadsOuter.lineBlur = .constant(0.5)
         try? style.addLayer(roadsOuter, layerPosition: .above(roadsGlowId))
-        print("[NEON] 🧡 roads-outer (main line) added")
 
         // Roads inner dark line (creates double-line effect)
         var roadsInner = LineLayer(id: "neon-roads-inner", source: streetsSourceId)
@@ -922,7 +924,6 @@ private final class NeonGridStyler {
         })
         roadsInner.lineBlur = .constant(0.0)
         try? style.addLayer(roadsInner, layerPosition: .above(roadsCoreId))
-        print("[NEON] 🟫 roads-inner (dark center) added - creates double-line effect")
 
         // Roads puck glow (bright highlight around user position)
         var roadsPuckGlow = LineLayer(id: "neon-roads-puck-glow", source: streetsSourceId)
@@ -938,11 +939,9 @@ private final class NeonGridStyler {
             6; 0.3    // Full opacity at zoom 6
             18; 0.3
         })
-        roadsPuckGlow.lineBlur = .constant(8.0) // Reduced blur radius
+        roadsPuckGlow.lineBlur = .constant(8.0)
         try? style.addLayer(roadsPuckGlow, layerPosition: .above("neon-roads-inner"))
-        print("[NEON] ✨ roads-puck-glow added for user location highlight")
 
-       
         // White road labels for visibility
         var roadLabels = SymbolLayer(id: "neon-road-labels", source: streetsSourceId)
         roadLabels.sourceLayer = "road_label"
@@ -954,99 +953,46 @@ private final class NeonGridStyler {
         roadLabels.symbolPlacement = .constant(.line)
         roadLabels.minZoom = 12.0
         try? style.addLayer(roadLabels, layerPosition: .above("neon-roads-puck-glow"))
-        print("[NEON] 🏷️ Added white road labels")
 
-        // Enhance road colors to red-orange
-        try? style.setLayerProperty(for: roadsGlowId, property: "line-color", value: "rgba(255, 100, 0, 1.0)") // Red-orange
-        try? style.setLayerProperty(for: roadsCoreId, property: "line-color", value: "rgba(255, 140, 0, 1.0)") // Orange with red tint
-        print("[NEON] ✨ Enhanced road colors to golden orange")
+        try? style.setLayerProperty(for: roadsGlowId, property: "line-color", value: "rgba(255, 100, 0, 1.0)")
+        try? style.setLayerProperty(for: roadsCoreId, property: "line-color", value: "rgba(255, 140, 0, 1.0)")
 
-        // Style the actual existing layers directly
-        // The "land" layer IS the background layer (type: "background")
-        // Set it to black instead of white to fix the white land issue at low zoom
-        do {
-            try style.setLayerProperty(for: "land", property: "background-color", value: "rgba(0, 0, 0, 1.0)")
-            print("[NEON] 🖤 Set land (background) layer to black")
-
-            // Verify it was set
-            if let bgColor = try? style.layerProperty(for: "land", property: "background-color") {
-                print("[NEON] 🔍 Verified land background-color: \(bgColor)")
-            }
-        } catch {
-            print("[NEON] ❌ Failed to set land background-color: \(error)")
-        }
-
-        // Also try setting it with a zoom expression to ensure it's black at ALL zoom levels
         try? style.setLayerProperty(for: "land", property: "background-color", value: [
             "interpolate", ["linear"], ["zoom"],
             0, "rgba(0, 0, 0, 1.0)",
             22, "rgba(0, 0, 0, 1.0)"
         ])
-        print("[NEON] 🖤 Set land background-color with zoom expression (always black)")
 
-        // Also hide any potential base map layers that might show white
         let baseLayers = ["land-structure-polygon", "land-structure-line", "aeroway-polygon", "aeroway-line"]
         for layerId in baseLayers {
-            try? style.setLayerProperty(for: layerId, property: "fill-opacity", value: [
-                "interpolate", ["linear"], ["zoom"],
-                0, 0.0,    // Transparent at all zoom levels
-                15, 0.0
-            ])
-            try? style.setLayerProperty(for: layerId, property: "line-opacity", value: [
-                "interpolate", ["linear"], ["zoom"],
-                0, 0.0,    // Transparent at all zoom levels
-                15, 0.0
-            ])
+            try? style.setLayerProperty(for: layerId, property: "fill-opacity", value: 0.0)
+            try? style.setLayerProperty(for: layerId, property: "line-opacity", value: 0.0)
         }
 
-        // Force hide any other potential white layers
         let potentialWhiteLayers = ["admin-0-boundary-bg", "admin-1-boundary-bg"]
         for layerId in potentialWhiteLayers {
             try? style.setLayerProperty(for: layerId, property: "line-opacity", value: 0.0)
             try? style.setLayerProperty(for: layerId, property: "visibility", value: "none")
         }
 
-        print("[NEON] 🌍 Made all land layers fully transparent with zoom expressions")
-
-        // Water layer - keep blue water visible
         try? style.setLayerProperty(for: "water", property: "fill-color", value: "rgba(20, 60, 120, 1.0)")
         try? style.setLayerProperty(for: "water", property: "fill-opacity", value: 1.0)
-        print("[NEON] 💧 Styled water layer blue")
-
-        // Just style the existing landuse layer - don't make it transparent!
-        // Green areas (parks, forests, etc) in landuse
         try? style.setLayerProperty(for: "landuse", property: "fill-color", value: [
             "case",
             ["in", ["get", "class"], ["literal", ["park", "cemetery", "grass", "recreation_ground", "golf_course", "pitch", "forest", "wood", "nature_reserve"]]],
-            "rgba(0, 200, 0, 1.0)", // Bright green for green spaces
-            "rgba(0, 0, 0, 0.0)"    // Transparent for other landuse (residential, commercial, etc)
+            "rgba(0, 200, 0, 1.0)",
+            "rgba(0, 0, 0, 0.0)"
         ])
         try? style.setLayerProperty(for: "landuse", property: "fill-opacity", value: 1.0)
-        print("[NEON] 🏞️ Styled landuse layer: green for parks/forests, transparent for other uses")
 
-        // National parks - force bright green at ALL zoom levels
         try? style.setLayerProperty(for: "national-park", property: "fill-color", value: "rgba(0, 180, 0, 1.0)")
         try? style.setLayerProperty(for: "national-park", property: "fill-opacity", value: 1.0)
-        print("[NEON] 🌳 Styled national-park layer bright green")
 
-        // Buildings
         try? style.setLayerProperty(for: "building", property: "fill-color", value: "rgba(40, 40, 40, 1.0)")
         try? style.setLayerProperty(for: "building", property: "fill-opacity", value: 0.8)
-        print("[NEON] 🏢 Styled building layer")
 
-        // REMOVED: neon-greenspace layer - we now style the existing landuse layer directly
-        // This eliminates redundancy and potential conflicts
-
-        // Water override - keep blue water
         try? style.setLayerProperty(for: "water-override", property: "fill-color", value: "rgba(20, 60, 120, 1.0)")
         try? style.setLayerProperty(for: "water-override", property: "fill-opacity", value: 1.0)
-        print("[NEON] 💙 Enhanced water to proper blue")
-
-
-
- 
-
-
     }
 
 

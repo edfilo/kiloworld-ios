@@ -236,6 +236,7 @@ struct ContentView: View {
                 activeAudioLayers: layerAudioEngine.activeLayerCount
             )
             .padding(.leading, 12)
+            .allowsHitTesting(false)
 
             TopButtonsRowView(
                 globeOn: $globeOn,
@@ -294,6 +295,7 @@ struct ContentView: View {
                 .padding(.horizontal, 5)
                 .padding(.bottom, 5)
             }
+            .allowsHitTesting(false)
         }
     }
 
@@ -315,6 +317,17 @@ struct ContentView: View {
             )
             .allowsHitTesting(false)
             .opacity(0.8)
+            .onAppear {
+                // Give it a moment for the coordinator binding to update
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    if let coordinator = hologramCoordinator {
+                        print("[hologramcoordinator] 🎨 HologramMetalView appeared, coordinator ready: \(coordinator)")
+                        mapCoordinator?.updateSkyGateHologramCoordinator(coordinator)
+                    } else {
+                        print("[hologramcoordinator] ⚠️ HologramMetalView appeared but coordinator not ready yet")
+                    }
+                }
+            }
         }
     }
 
@@ -331,7 +344,7 @@ struct ContentView: View {
                 actualPitch = cameraState.pitch
                 actualCenter = cameraState.center
                 actualBearing = cameraState.bearing
-                
+
                 // Update puck screen position for hologram particle emission
                 if let mapCoordinator = mapCoordinator,
                    let puckPosition = mapCoordinator.getPuckScreenPosition() {
@@ -340,7 +353,7 @@ struct ContentView: View {
                 } else {
                    // print("[puck] ⚠️ Failed to get puck position from map coordinator")
                 }
-                
+
                 // IMPORTANT: Update viewport to match actual camera to prevent snap-back
                 // BUT don't update during compass rotation as it will override anchor point
                 if !allowViewportUpdate && !isCompassRotating {
@@ -361,7 +374,7 @@ struct ContentView: View {
                         )
                     }
                 }
-                
+
                 // DISABLED: Pitch adjustment was creating infinite loop and preventing anchor positioning
                 // TODO: Re-implement pitch adjustment without infinite feedback loop
                 // let optimalPitch = self.optimalPitch
@@ -386,6 +399,17 @@ struct ContentView: View {
             defaultZoom: defaultZoom,
             userSettings: userSettings
         )
+        .onChange(of: hologramCoordinator) { newCoordinator in
+            // Update SkyGate with hologram coordinator when it becomes available
+            print("[hologramcoordinator] 🔄 Hologram coordinator onChange fired: \(newCoordinator != nil ? "✅" : "❌")")
+            if let coordinator = newCoordinator {
+                print("[hologramcoordinator] 🔄 Hologram coordinator created: \(coordinator)")
+                print("[hologramcoordinator] 🔄 Map coordinator available: \(mapCoordinator != nil ? "✅" : "❌")")
+                mapCoordinator?.updateSkyGateHologramCoordinator(coordinator)
+            } else {
+                print("[hologramcoordinator] ⚠️ Hologram coordinator became nil")
+            }
+        }
     }
     
     private var baseContent: some View {
