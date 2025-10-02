@@ -364,7 +364,7 @@ class MetalWavetableSynth {
         
         // Only log occasionally to avoid spam
         if currentSampleIndex % 44100 == 0 { // Once per second
-            print("🎵 Rendering audio: \(frames) frames, time: \(String(format: "%.2f", Float(currentSampleIndex) / synthParams.sampleRate))s")
+           // print("🎵 Rendering audio: \(frames) frames, time: \(String(format: "%.2f", Float(currentSampleIndex) / synthParams.sampleRate))s")
         }
         
         // Count active notes
@@ -441,12 +441,12 @@ class MetalWavetableSynth {
         
         // Log buffer format details occasionally
         if currentSampleIndex % 44100 == 0 {
-            print("[audio] 🔧 Audio buffer info:")
-            print("[audio]    Expected frames: \(frames)")
-            print("[audio]    Number of buffers: \(audioBufferList.pointee.mNumberBuffers)")
-            print("[audio]    Buffer 0 size: \(audioBufferList.pointee.mBuffers.mDataByteSize) bytes")
-            print("[audio]    Expected bytes for stereo interleaved: \(frames * 2 * 4) (for Float32)")
-            print("[audio]    Actual buffer capacity: \(audioBufferList.pointee.mBuffers.mDataByteSize / 4) floats")
+            //print("[audio] 🔧 Audio buffer info:")
+            //print("[audio]    Expected frames: \(frames)")
+            //print("[audio]    Number of buffers: \(audioBufferList.pointee.mNumberBuffers)")
+            //print("[audio]    Buffer 0 size: \(audioBufferList.pointee.mBuffers.mDataByteSize) bytes")
+            //print("[audio]    Expected bytes for stereo interleaved: \(frames * 2 * 4) (for Float32)")
+            //print("[audio]    Actual buffer capacity: \(audioBufferList.pointee.mBuffers.mDataByteSize / 4) floats")
 
             // Check if we have multiple buffers (non-interleaved)
             if audioBufferList.pointee.mNumberBuffers > 1 {
@@ -456,7 +456,7 @@ class MetalWavetableSynth {
                     print("[audio]    Buffer \(index): \(buffer.mDataByteSize) bytes")
                 }
             } else {
-                print("[audio]    ✅ Single buffer - should be interleaved format")
+                //print("[audio]    ✅ Single buffer - should be interleaved format")
             }
         }
         
@@ -703,9 +703,9 @@ class MetalWavetableSynth {
         
         // Log Metal execution occasionally
         if currentSampleIndex % 44100 == 0 {
-            print("🔧 Running Metal compute shader: \(frameCount) samples")
-            print("   Groups: \(numGroups.width), Threads per group: \(threadsPerGroup.width)")
-            print("   Total threads: \(numGroups.width * threadsPerGroup.width)")
+          //  print("🔧 Running Metal compute shader: \(frameCount) samples")
+          //  print("   Groups: \(numGroups.width), Threads per group: \(threadsPerGroup.width)")
+          //  print("   Total threads: \(numGroups.width * threadsPerGroup.width)")
         }
         
         // Use exact thread count to prevent extra threads

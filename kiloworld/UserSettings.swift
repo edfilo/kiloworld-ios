@@ -125,6 +125,20 @@ class UserSettings: ObservableObject {
         didSet { userDefaults.set(synthRelease, forKey: "synth_release") }
     }
 
+    // MARK: - Audio Playback Settings
+
+    @Published var audioPlaybackPitch: Float = 1.0 {
+        didSet { userDefaults.set(audioPlaybackPitch, forKey: "audio_playback_pitch") }
+    }
+
+    @Published var audioPlaybackSpeed: Float = 1.0 {
+        didSet { userDefaults.set(audioPlaybackSpeed, forKey: "audio_playback_speed") }
+    }
+
+    @Published var audioPlaybackVarispeed: Float = 1.0 {
+        didSet { userDefaults.set(audioPlaybackVarispeed, forKey: "audio_playback_varispeed") }
+    }
+
     // MARK: - Initialization
     
     init() {
@@ -218,8 +232,18 @@ class UserSettings: ObservableObject {
         if userDefaults.object(forKey: "synth_release") != nil {
             synthRelease = userDefaults.float(forKey: "synth_release")
         }
+        if userDefaults.object(forKey: "audio_playback_pitch") != nil {
+            audioPlaybackPitch = userDefaults.float(forKey: "audio_playback_pitch")
+        }
+        if userDefaults.object(forKey: "audio_playback_speed") != nil {
+            audioPlaybackSpeed = userDefaults.float(forKey: "audio_playback_speed")
+        }
+        if userDefaults.object(forKey: "audio_playback_varispeed") != nil {
+            audioPlaybackVarispeed = userDefaults.float(forKey: "audio_playback_varispeed")
+        }
 
         print("[settings] 📱 Loaded ADSR: A=\(synthAttack) D=\(synthDecay) S=\(synthSustain) R=\(synthRelease)")
+        print("[settings] 📱 Loaded Audio Playback: Pitch=\(audioPlaybackPitch) Speed=\(audioPlaybackSpeed) Varispeed=\(audioPlaybackVarispeed)")
         print("[settings] 📱 Loaded UI settings and hologram controls")
     }
     
@@ -253,6 +277,9 @@ class UserSettings: ObservableObject {
         synthDecay = 0.3
         synthSustain = 0.7
         synthRelease = 0.5
+        audioPlaybackPitch = 1.0
+        audioPlaybackSpeed = 1.0
+        audioPlaybackVarispeed = 1.0
         print("[settings] 🔄 Reset to default settings")
     }
 }

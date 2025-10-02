@@ -229,10 +229,7 @@ struct HologramMetalView: UIViewRepresentable {
             particleBlink = settings.particleBlink
             particleRandomSize = settings.particleRandomSize
             particleGlow = settings.particleGlow
-            print("[emission] ⚡ Emission density changed to: \(emissionDensity)")
-            print("[emission] 🔍 bgMin: \(settings.hologramBgMin), bgMax: \(settings.hologramBgMax)")
-            print("[emission] 🔍 Particle count: \(particleCount)")
-
+          
             // Map speed slider to travelTimeSec (lower time = faster)
             // speed 0 → 8.0s (slow), speed 1 → 2.0s (fast)
             let minT: Float = 2.0
@@ -258,17 +255,7 @@ struct HologramMetalView: UIViewRepresentable {
             // This ensures the emission point stays at the same screen location regardless of zoom
         }
 
-        func setGlobeMode(_ globeMode: Bool) {
-            isInGlobeMode = globeMode
 
-            // When entering globe mode, reset rotation to face us (0 degrees)
-            if globeMode {
-                rotation = 0.0
-                print("[hologram] 🌍 Globe mode enabled - rotation paused and reset to face user")
-            } else {
-                print("[hologram] 🌍 Globe mode disabled - rotation resumed")
-            }
-        }
 
         private func scheduleParticleRebuild(newCount: Int) {
             // Cancel any existing timer
@@ -1619,7 +1606,7 @@ struct HologramMetalView: UIViewRepresentable {
 
             // Debug logging for background hiding values being sent to shader
             if Int(time * 10) % 300 == 0 { // Log once per 30 seconds instead of every second
-                print("[emission] 🎭 Uniforms bgMin=\(uniforms.bgMin), bgMax=\(uniforms.bgMax), emissionDensity=\(uniforms.emissionDensity)")
+                //print("[emission] 🎭 Uniforms bgMin=\(uniforms.bgMin), bgMax=\(uniforms.bgMax), emissionDensity=\(uniforms.emissionDensity)")
             }
 
             uniformBuffer.contents().copyMemory(from: &uniforms, byteCount: MemoryLayout<Uniforms>.size)

@@ -48,16 +48,19 @@ struct SettingsModalView: View {
                 }
                 .padding()
             }
+            .scrollContentBackground(.hidden) // Hide default ScrollView background
+            .background(Color.clear)
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .navigationBarItems(trailing: Button("Done") {
                 dismiss()
             })
-            .toolbarBackground(Color.black, for: .navigationBar)
+            .toolbarBackground(.clear, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
+            .toolbarColorScheme(.dark, for: .navigationBar)
         }
         .background(Color.clear) // Transparent modal background
-        .presentationBackground(Color.black.opacity(0.3)) // Semi-transparent sheet background
+        .presentationBackground(.clear) // Fully transparent sheet background for iOS 18
     }
 
     private var hologramControlsSection: some View {
@@ -364,7 +367,7 @@ struct SettingsModalView: View {
             }
         }
         .padding()
-        .background(Color.black.opacity(0.05))
+        .background(Color.clear)
         .cornerRadius(12)
     }
 
@@ -433,7 +436,7 @@ struct SettingsModalView: View {
             }
         }
         .padding()
-        .background(Color.black.opacity(0.05))
+        .background(Color.clear)
         .cornerRadius(12)
     }
 
@@ -524,19 +527,90 @@ struct SettingsModalView: View {
             }
         }
         .padding()
-        .background(Color.black.opacity(0.05))
+        .background(Color.clear)
         .cornerRadius(12)
     }
 
     private var synthControlsSection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("SYNTH SETTINGS")
+            Text("AUDIO SETTINGS")
                 .font(.headline)
                 .fontWeight(.bold)
                 .foregroundColor(.white)
 
+            // Audio Playback Controls
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Looping Playback")
+                    .font(.subheadline)
+                    .foregroundColor(.cyan)
+                    .padding(.bottom, 4)
+
+                // Pitch Slider
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Pitch")
+                            .font(.subheadline)
+                            .foregroundColor(.white)
+                        Spacer()
+                        Text(String(format: "%.2fx", userSettings.audioPlaybackPitch))
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .foregroundColor(.white)
+                    }
+                    Slider(value: $userSettings.audioPlaybackPitch, in: 0.5...2.0, step: 0.01)
+                        .accentColor(.cyan)
+                    Text("0.5x = lower pitch, 2.0x = higher pitch")
+                        .font(.caption2)
+                        .foregroundColor(.gray)
+                }
+
+                // Speed Slider
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Speed")
+                            .font(.subheadline)
+                            .foregroundColor(.white)
+                        Spacer()
+                        Text(String(format: "%.2fx", userSettings.audioPlaybackSpeed))
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .foregroundColor(.white)
+                    }
+                    Slider(value: $userSettings.audioPlaybackSpeed, in: 0.5...2.0, step: 0.01)
+                        .accentColor(.cyan)
+                    Text("0.5x = slower, 2.0x = faster")
+                        .font(.caption2)
+                        .foregroundColor(.gray)
+                }
+
+                // Varispeed Slider (record player style)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Varispeed")
+                            .font(.subheadline)
+                            .foregroundColor(.white)
+                        Spacer()
+                        Text(String(format: "%.2fx", userSettings.audioPlaybackVarispeed))
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .foregroundColor(.white)
+                    }
+                    Slider(value: $userSettings.audioPlaybackVarispeed, in: 0.5...2.0, step: 0.01)
+                        .accentColor(.cyan)
+                    Text("Record player style: changes pitch and speed together")
+                        .font(.caption2)
+                        .foregroundColor(.gray)
+                }
+            }
+            .padding(.bottom, 8)
+
             // ADSR Envelope Controls
             VStack(alignment: .leading, spacing: 12) {
+                Text("Synth ADSR Envelope")
+                    .font(.subheadline)
+                    .foregroundColor(.cyan)
+                    .padding(.bottom, 4)
+
                 // Attack
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
@@ -615,7 +689,7 @@ struct SettingsModalView: View {
             }
         }
         .padding()
-        .background(Color.black.opacity(0.05))
+        .background(Color.clear)
         .cornerRadius(12)
     }
 
@@ -696,7 +770,7 @@ struct SettingsModalView: View {
             }
         }
         .padding()
-        .background(Color.black.opacity(0.05))
+        .background(Color.clear)
         .cornerRadius(12)
     }
 
@@ -743,7 +817,7 @@ struct SettingsModalView: View {
             print("[modal] ❌ No user location for zoom update")
             return
         }
-        mapCoordinator?.updateCameraZoom(zoom, userLocation: userLocation)
+        mapCoordinator?.updateCamera(userLocation: userLocation, zoom: zoom, duration: 0.5)
     }
 
     private func loadEditObject() {

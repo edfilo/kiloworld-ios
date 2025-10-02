@@ -7,6 +7,7 @@
 
 import AVFoundation
 import Foundation
+import Combine
 
 class LayerAudioEngine: ObservableObject {
     private var audioEngine: AVAudioEngine
@@ -15,13 +16,46 @@ class LayerAudioEngine: ObservableObject {
     private var layerVolumes: [String: Float] = [:]
     private var isPlaying: [String: Bool] = [:]
     private var tempFileURLs: [String: URL] = [:] // Track temp files for cleanup
+    private var pitchNodes: [String: AVAudioUnitTimePitch] = [:] // Pitch/speed control
 
     @Published var masterVolume: Float = 0.7
     @Published var activeLayerCount: Int = 0
+    @Published var globalPitch: Float = 1.0 // 0.5 to 2.0
+    @Published var globalSpeed: Float = 1.0 // 0.5 to 2.0
+
+    private var userSettings: UserSettings?
+    private var cancellables = Set<AnyCancellable>()
 
     init() {
         audioEngine = AVAudioEngine()
         setupAudioSession()
+    }
+
+    func observeUserSettings(_ settings: UserSettings) {
+        userSettings = settings
+
+        // Observe pitch changes
+        settings.$audioPlaybackPitch
+            .sink { [weak self] newPitch in
+                self?.setGlobalPitch(newPitch)
+            }
+            .store(in: &cancellables)
+
+        // Observe speed changes
+        settings.$audioPlaybackSpeed
+            .sink { [weak self] newSpeed in
+                self?.setGlobalSpeed(newSpeed)
+            }
+            .store(in: &cancellables)
+
+        // Observe varispeed changes
+        settings.$audioPlaybackVarispeed
+            .sink { [weak self] newVarispeed in
+                self?.setGlobalVarispeed(newVarispeed)
+            }
+            .store(in: &cancellables)
+
+        print("🎧 LayerAudioEngine: Now observing audio playback settings")
     }
 
     deinit {
@@ -229,19 +263,29 @@ class LayerAudioEngine: ObservableObject {
 
         print("🎵 LayerAudioEngine: Creating player node for '\(layerId)'")
         let playerNode = AVAudioPlayerNode()
+        let pitchNode = AVAudioUnitTimePitch()
         let volume = layerVolumes[layerId] ?? 1.0
 
-        audioEngine.attach(playerNode)
-        print("✅ LayerAudioEngine: Player node attached")
+        // Configure pitch and speed
+        pitchNode.pitch = pitchToCents(globalPitch)
+        pitchNode.rate = globalSpeed
+        print("🎛️ LayerAudioEngine: Configuring pitch=\(pitchNode.pitch) cents (from \(globalPitch)x), speed=\(pitchNode.rate)x")
 
-        audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: audioBuffer.format)
-        print("✅ LayerAudioEngine: Player node connected to mixer")
+        audioEngine.attach(playerNode)
+        audioEngine.attach(pitchNode)
+        print("✅ LayerAudioEngine: Player node and pitch node attached")
+
+        // Connect: playerNode -> pitchNode -> mixer
+        audioEngine.connect(playerNode, to: pitchNode, format: audioBuffer.format)
+        audioEngine.connect(pitchNode, to: audioEngine.mainMixerNode, format: audioBuffer.format)
+        print("✅ LayerAudioEngine: Player node connected to pitch node, then to mixer")
 
         // Start the audio engine only after we have nodes attached
         ensureAudioEngineStarted()
         print("🎵 LayerAudioEngine: Audio engine running: \(audioEngine.isRunning)")
 
         playerNodes[layerId] = playerNode
+        pitchNodes[layerId] = pitchNode
         isPlaying[layerId] = true
 
         let finalVolume = volume * masterVolume
@@ -280,6 +324,12 @@ class LayerAudioEngine: ObservableObject {
 
         playerNode.stop()
         audioEngine.detach(playerNode)
+
+        // Also detach pitch node if it exists
+        if let pitchNode = pitchNodes[layerId] {
+            audioEngine.detach(pitchNode)
+            pitchNodes.removeValue(forKey: layerId)
+        }
 
         playerNodes.removeValue(forKey: layerId)
         isPlaying[layerId] = false
@@ -332,6 +382,54 @@ class LayerAudioEngine: ObservableObject {
 
     private func updateActiveLayerCount() {
         activeLayerCount = playerNodes.count
+    }
+
+    func setGlobalPitch(_ pitch: Float) {
+        let clampedPitch = max(0.5, min(2.0, pitch))
+        globalPitch = clampedPitch
+
+        // Update all active pitch nodes
+        for (layerId, pitchNode) in pitchNodes {
+            pitchNode.pitch = pitchToCents(clampedPitch)
+            print("🎛️ LayerAudioEngine: Updated pitch for '\(layerId)' to \(pitchNode.pitch) cents")
+        }
+    }
+
+    func setGlobalSpeed(_ speed: Float) {
+        let clampedSpeed = max(0.5, min(2.0, speed))
+        globalSpeed = clampedSpeed
+
+        // Update all active pitch nodes
+        for (layerId, pitchNode) in pitchNodes {
+            pitchNode.rate = clampedSpeed
+            print("🎛️ LayerAudioEngine: Updated speed for '\(layerId)' to \(clampedSpeed)x")
+        }
+    }
+
+    func setGlobalVarispeed(_ varispeed: Float) {
+        let clampedVarispeed = max(0.5, min(2.0, varispeed))
+
+        // Varispeed affects both pitch and speed together (like a record player)
+        // Update all active pitch nodes
+        for (layerId, pitchNode) in pitchNodes {
+            // For varispeed, we need to apply the rate change
+            // The rate parameter already handles both pitch and speed together
+            pitchNode.rate = clampedVarispeed
+            // Reset pitch to 0 cents (no additional pitch shift) for pure varispeed
+            pitchNode.pitch = 0.0
+            print("🎛️ LayerAudioEngine: Updated varispeed for '\(layerId)' to \(clampedVarispeed)x (record player style)")
+        }
+
+        // Update stored values
+        globalSpeed = clampedVarispeed
+        // Keep pitch at 1.0 since varispeed handles everything
+        globalPitch = 1.0
+    }
+
+    // Convert pitch multiplier (0.5-2.0) to cents (-1200 to +1200)
+    private func pitchToCents(_ pitchMultiplier: Float) -> Float {
+        // Formula: cents = 1200 * log2(ratio)
+        return 1200.0 * log2(pitchMultiplier)
     }
 
     func removeLayer(layerId: String) {

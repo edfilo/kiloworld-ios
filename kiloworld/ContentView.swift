@@ -153,6 +153,9 @@ struct ContentView: View {
     @State private var mapCoordinator: CustomMapView.Coordinator?
     @State private var globeOn = false
 
+    // One-shot latch to avoid repeating initial centering
+    @State private var didCenterOnInitialLocation = false
+
     // Live clock for debug display
     @State private var currentTime = Date()
     @State private var clockTimer: Timer?
@@ -203,179 +206,51 @@ struct ContentView: View {
     }
     
     // Neon Grid MapView using UIKit approach
-    private var mapboxMapView: some View {
-        CustomMapView(
-            viewport: $viewport,
-            allowViewportUpdate: allowViewportUpdate,
-            userPath: pathStorage.currentPath,
-            userLocation: locationManager.currentLocation?.coordinate,
-            onCameraChanged: { cameraState in
-                // Update actual camera values for debug display
-                actualZoom = cameraState.zoom
-                actualPitch = cameraState.pitch
-                actualCenter = cameraState.center
-                actualBearing = cameraState.bearing
-                
-                // Update puck screen position for hologram particle emission
-                if let mapCoordinator = mapCoordinator,
-                   let puckPosition = mapCoordinator.getPuckScreenPosition() {
-                    puckScreenPosition = puckPosition
-                    print("[puck] 📍 Updated puck position: \(puckPosition) (mode: \(mapCoordinator.mode == .globe ? "globe" : "neon"))")
-                } else {
-                    print("[puck] ⚠️ Failed to get puck position from map coordinator")
-                }
-                
-                // IMPORTANT: Update viewport to match actual camera to prevent snap-back
-                // BUT don't update during compass rotation as it will override anchor point
-                if !allowViewportUpdate && !isCompassRotating {
-                    viewport = .camera(
-                        center: cameraState.center,
-                        zoom: cameraState.zoom,
-                        bearing: cameraState.bearing,
-                        pitch: cameraState.pitch
-                    )
-                }
-                
-                // DISABLED: Pitch adjustment was creating infinite loop and preventing anchor positioning
-                // TODO: Re-implement pitch adjustment without infinite feedback loop
-                // let optimalPitch = self.optimalPitch
-                // let pitchDifference = abs(cameraState.pitch - optimalPitch)
-            },
-            onMapLoaded: {
-                print("[map] 🗺️ Neon Grid Map loaded - Setting up SkyGateRecognizer")
-                // We'll set up SkyGateRecognizer in the UIViewRepresentable
-            },
-            metalSynth: metalSynth,
-            onSkyTouchCountChanged: { count in
-                activeSkyTouches = count
-            },
-            coordinator: $mapCoordinator,
-            hologramCoordinator: hologramCoordinator,
-            onUserInteraction: {
-                resetAutoCenter()
-            },
-            dynamicTopPadding: dynamicTopPadding,
-            dynamicBottomPadding: dynamicBottomPadding,
-            defaultPitch: defaultPitch,
-            defaultZoom: defaultZoom,
-            userSettings: userSettings
-        )
-    }
-    
-    var body: some View {
-        ZStack {
-            // Map layer
+    private var mainMapLayer: AnyView {
+        AnyView(
             mapboxMapView
                 .ignoresSafeArea()
-                .onChange(of: [userSettings.horizonWidth, userSettings.horizonStart, userSettings.horizonFeather]) { _, newValues in
-                    // Re-apply neon grid style when any horizon setting changes
-                    print("[map] 🔄 Horizon settings changed: width=\(newValues[0]), start=\(newValues[1]), feather=\(newValues[2])")
-                    if let mapCoordinator = mapCoordinator {
-                        mapCoordinator.reapplyNeonGridStyle(with: userSettings)
-                    }
+                .onChange(of: userSettings.horizonWidth) { _, _ in
+                    mapCoordinator?.reapplyNeonGridStyle(with: userSettings)
                 }
-            
-            // Debug overlay and controls
-            VStack {
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        // Live date/time on same line in retro digital font
-                        Text("\(DateFormatter.digitalDate.string(from: currentTime)) \(DateFormatter.digitalTime.string(from: currentTime))")
-                            .font(.custom("Courier New", size: 14))
-                            .fontWeight(.bold)
-                            .foregroundColor(.green)
-                        Text("STEPS TAKEN: \(pathStorage.currentPath.count)")
-                            .font(.custom("Courier New", size: 14))
-                            .fontWeight(.bold)
-                            .foregroundColor(.green)
-                        Text(nearestCityText)
-                            .font(.custom("Courier New", size: 14))
-                            .fontWeight(.bold)
-                            .foregroundColor(.green)
-                        Text("PARTICLES: \(String(format: "%.0f", userSettings.hologramParticleCount))")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.pink)
-                        Text("EMISSION: \(String(format: "%.2f", userSettings.hologramEmissionDensity))")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.pink)
-                        Text("ZOOM: \(String(format: "%.2f", actualZoom))")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.white)
-                        Text("PITCH: \(String(format: "%.1f", actualPitch))°")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.white)
-                        Text("SYNTH: \(activeSkyTouches) notes")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.cyan)
-                        Text("AUDIO LAYERS: \(layerAudioEngine.activeLayerCount)")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.yellow)
-                    }
-                    .padding(8)
-                    .background(Color.black.opacity(0.7))
-                    .cornerRadius(6)
-                    
-                    Spacer()
+                .onChange(of: userSettings.horizonStart) { _, _ in
+                    mapCoordinator?.reapplyNeonGridStyle(with: userSettings)
                 }
-                Spacer()
-            }
+                .onChange(of: userSettings.horizonFeather) { _, _ in
+                    mapCoordinator?.reapplyNeonGridStyle(with: userSettings)
+                }
+        )
+    }
+
+    private var overlayGroup1: some View {
+        ZStack {
+            DebugHUDView(
+                currentTime: currentTime,
+                steps: pathStorage.currentPath.count,
+                nearestCityText: nearestCityText,
+                particleCount: userSettings.hologramParticleCount,
+                emission: userSettings.hologramEmissionDensity,
+                actualZoom: actualZoom,
+                actualPitch: actualPitch,
+                activeSkyNotes: activeSkyTouches,
+                activeAudioLayers: layerAudioEngine.activeLayerCount
+            )
             .padding(.leading, 12)
-            
-            // Top button row - flush to safe area top
-            VStack {
-                HStack(spacing: 5) { // 5px spacing between buttons
-                    Spacer()
 
-                    // Globe toggle button
-                    Button {
-                        globeOn.toggle()
-                        mapCoordinator?.toggleElectrifiedGlobe(userLocation: locationManager.currentLocation?.coordinate)
-                        // Update hologram globe mode to pause rotation
-                        hologramCoordinator?.setGlobeMode(globeOn)
+            TopButtonsRowView(
+                globeOn: $globeOn,
+                showSettingsModal: $showSettingsModal,
+                showUserModal: $showUserModal,
+                mapCoordinator: $mapCoordinator,
+                hologramCoordinator: $hologramCoordinator,
+                location: locationManager.currentLocation?.coordinate,
+                puckScreenPosition: $puckScreenPosition
+            )
+        }
+    }
 
-                        // Force update puck position after mode change to prevent disappearing
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                            if let coordinator = mapCoordinator,
-                               let puckPosition = coordinator.getPuckScreenPosition() {
-                                puckScreenPosition = puckPosition
-                                print("[puck] 🔄 Force updated puck position after mode change: \(puckPosition)")
-                            }
-                        }
-                    } label: {
-                        Image(systemName: globeOn ? "globe.europe.africa.fill" : "globe")
-                            .font(.system(size: 36))
-                            .foregroundColor(.white)
-                    }
-                    .frame(width: 60, height: 60)
-                    .background(Color.black.opacity(0.7))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-
-                    // Settings button
-                    Button(action: { showSettingsModal = true }) {
-                        Image(systemName: "gearshape.fill")
-                            .font(.system(size: 36))
-                            .foregroundColor(.white)
-                    }
-                    .frame(width: 60, height: 60)
-                    .background(Color.black.opacity(0.7))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-
-                    // User button
-                    Button(action: { showUserModal = true }) {
-                        Image(systemName: "person.circle.fill")
-                            .font(.system(size: 36))
-                            .foregroundColor(.white)
-                    }
-                    .frame(width: 60, height: 60)
-                    .background(Color.black.opacity(0.7))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                }
-                .padding(.trailing, 5) // Right margin only
-
-                Spacer()
-            }
-            
-            // Hide Mapbox logo with overlay
+    private var overlayGroup2: some View {
+        ZStack {
             VStack {
                 Spacer()
                 HStack {
@@ -388,48 +263,14 @@ struct ContentView: View {
                 .padding(.bottom, 8)
                 .padding(.leading, 8)
             }
-            
-            // Gradient mask that fades map from transparent to black at bottom
-            VStack(spacing: 0) {
-                // 20px roads fade out from top
-                LinearGradient(
-                    gradient: Gradient(stops: [
-                        .init(color: .black, location: 0.0),           // Fully black at top
-                        .init(color: .black.opacity(0.5), location: 0.7), // Start fading
-                        .init(color: .clear, location: 1.0)            // Transparent at bottom of 20px
-                    ]),
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .frame(height: 20) // Fixed 20px height
-                .allowsHitTesting(false) // Don't intercept touches
 
-                Spacer()
+            EdgeGradients()
 
-                // 100px black gradient from bottom (ignoring safe area)
-                LinearGradient(
-                    gradient: Gradient(stops: [
-                        .init(color: .clear, location: 0.0),          // Transparent at top of 100px
-                        .init(color: .black.opacity(0.3), location: 0.5), // Start fading
-                        .init(color: .black.opacity(0.8), location: 0.8), // More opacity
-                        .init(color: .black, location: 1.0)           // Fully black at bottom
-                    ]),
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .frame(height: 100) // Fixed 100px height
-                .allowsHitTesting(false) // Don't intercept touches
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity) // Fill entire screen
-            .ignoresSafeArea(.all) // Extend to absolute screen edges
-            
-            // Chat interface positioned 5px from safe areas
             VStack {
                 Spacer()
-                    .allowsHitTesting(false) // Let map handle touches in empty area above chat
-                
-                // Chat interface with latest messages above controls
-                ChatView(
+                    .allowsHitTesting(false)
+
+                AnyView(ChatView(
                     messageText: $messageText,
                     chatMessages: $chatMessages,
                     statusText: $statusText,
@@ -449,23 +290,21 @@ struct ContentView: View {
                         latestAIMessage = message
                         print("[typewriter] 📨 Latest AI message updated: \"\(String(message.prefix(50)))...\"")
                     }
-                )
-                .padding(.horizontal, 5) // 5px from left/right safe areas
-                .padding(.bottom, 5) // 5px from bottom safe area
+                ))
+                .padding(.horizontal, 5)
+                .padding(.bottom, 5)
             }
-            
-            // Compass beam overlay - shows direction you're facing
+        }
+    }
+
+    private var overlayGroup3: some View {
+        ZStack {
             CompassBeamView(
                 heading: compassHeading,
                 isVisible: showCompassBeam
             )
-            .allowsHitTesting(false) // Don't block map touches
-            
-            // Typewriter message display in the sky - TEMPORARILY HIDDEN
-            // TypewriterMessageView(latestMessage: latestAIMessage)
-            // .allowsHitTesting(false) // Don't block map touches
-            
-            // Hologram Metal view - always visible, no touch blocking
+            .allowsHitTesting(false)
+
             HologramMetalView(
                 depthAmount: depthAmount,
                 globalSize: globalSize,
@@ -474,9 +313,93 @@ struct ContentView: View {
                 puckScreenPosition: puckScreenPosition,
                 coordinator: $hologramCoordinator
             )
-            .allowsHitTesting(false) // Disable touch to let map/skygate handle touches
-            .opacity(0.8) // Slightly transparent so map is visible behind
+            .allowsHitTesting(false)
+            .opacity(0.8)
         }
+    }
+
+    @ViewBuilder
+    private var mapboxMapView: some View {
+        CustomMapView(
+            viewport: $viewport,
+            allowViewportUpdate: allowViewportUpdate,
+            userPath: pathStorage.currentPath,
+            userLocation: locationManager.currentLocation?.coordinate,
+            onCameraChanged: { (cameraState: CameraState) in
+                // Update actual camera values for debug display
+                actualZoom = cameraState.zoom
+                actualPitch = cameraState.pitch
+                actualCenter = cameraState.center
+                actualBearing = cameraState.bearing
+                
+                // Update puck screen position for hologram particle emission
+                if let mapCoordinator = mapCoordinator,
+                   let puckPosition = mapCoordinator.getPuckScreenPosition() {
+                    puckScreenPosition = puckPosition
+                   // print("[puck] 📍 Updated puck position: \(puckPosition) (mode: \(mapCoordinator.mode == .globe ? "globe" : "neon"))")
+                } else {
+                   // print("[puck] ⚠️ Failed to get puck position from map coordinator")
+                }
+                
+                // IMPORTANT: Update viewport to match actual camera to prevent snap-back
+                // BUT don't update during compass rotation as it will override anchor point
+                if !allowViewportUpdate && !isCompassRotating {
+                    // Only write if something actually changed to avoid feedback loops
+                    let vc = viewport.camera
+                    let same =
+                        (vc?.zoom == cameraState.zoom) &&
+                        (vc?.bearing == cameraState.bearing) &&
+                        (vc?.pitch == cameraState.pitch) &&
+                    abs((vc?.center?.latitude ?? 0) - cameraState.center.latitude) < 1e-9 &&
+                    abs((vc?.center?.longitude ?? 0) - cameraState.center.longitude) < 1e-9
+                    if !same {
+                        viewport = .camera(
+                            center: cameraState.center,
+                            zoom: cameraState.zoom,
+                            bearing: cameraState.bearing,
+                            pitch: cameraState.pitch
+                        )
+                    }
+                }
+                
+                // DISABLED: Pitch adjustment was creating infinite loop and preventing anchor positioning
+                // TODO: Re-implement pitch adjustment without infinite feedback loop
+                // let optimalPitch = self.optimalPitch
+                // let pitchDifference = abs(cameraState.pitch - optimalPitch)
+            },
+            onMapLoaded: {
+                print("[map] 🗺️ Neon Grid Map loaded - Setting up SkyGateRecognizer")
+                // We'll set up SkyGateRecognizer in the UIViewRepresentable
+            },
+            metalSynth: metalSynth,
+            onSkyTouchCountChanged: { (count: Int) in
+                activeSkyTouches = count
+            },
+            coordinator: $mapCoordinator,
+            hologramCoordinator: hologramCoordinator,
+            onUserInteraction: { () -> Void in
+                resetAutoCenter()
+            },
+            dynamicTopPadding: dynamicTopPadding,
+            dynamicBottomPadding: dynamicBottomPadding,
+            defaultPitch: defaultPitch,
+            defaultZoom: defaultZoom,
+            userSettings: userSettings
+        )
+    }
+    
+    private var baseContent: some View {
+        ZStack {
+            mainMapLayer
+            overlayGroup1
+            overlayGroup2
+            overlayGroup3
+        }
+    }
+
+    @ViewBuilder
+    var body: some View {
+        baseContent
         .sheet(isPresented: $showUserModal) {
             UserModalView(
                 pathStorage: pathStorage,
@@ -494,7 +417,7 @@ struct ContentView: View {
                 onSessionClear: clearSessionData
             )
         }
-        .sheet(isPresented: $showSettingsModal) {
+        .fullScreenCover(isPresented: $showSettingsModal) {
             SettingsModalView(
                 userSettings: userSettings,
                 dynamicTopPadding: $dynamicTopPadding,
@@ -506,6 +429,7 @@ struct ContentView: View {
                 generatedImages: $generatedImages,
                 currentXid: $currentXid
             )
+            .background(BackgroundClearView())
         }
         .onAppear {
             print("[map] 🏁 App appeared - requesting location permission")
@@ -520,6 +444,9 @@ struct ContentView: View {
             )
             print("[settings] 📐 Updated initial viewport: zoom=\(defaultZoom), pitch=\(defaultPitch)°")
             
+            // Setup audio playback settings observation
+            layerAudioEngine.observeUserSettings(userSettings)
+
             // MetalWavetableSynth is now created early during initialization
             print("🔧 MetalWavetableSynth status: \(metalSynth != nil ? "✅ Available" : "❌ Failed")")
 
@@ -611,24 +538,24 @@ struct ContentView: View {
             clockTimer = nil
             print("[map] 🗑️ Cleaned up timers")
         }
-        .onChange(of: currentXid) { oldValue, newValue in
-            if let xid = newValue {
-                setupFirebaseListeners(xid: xid)
-            }
+        // MERGED: set up Firebase and persist whenever currentXid changes
+        .onChange(of: currentXid) { _, newValue in
+            if let xid = newValue { setupFirebaseListeners(xid: xid) }
+            saveSessionData()
         }
-        .onChange(of: locationManager.currentLocation) { oldValue, newValue in
-            // When location becomes available for the first time, use anchor-based positioning
-            if oldValue == nil && newValue != nil {
-                print("[map] 📍 Location became available, using anchor-based positioning")
-                if let coordinator = mapCoordinator {
-                    coordinator.updateCamera(
-                        userLocation: newValue!.coordinate,
-                        zoom: defaultZoom,
-                        bearing: 0.0,
-                        pitch: defaultPitch,
-                        duration: 1.0
-                    )
-                }
+        // IMPORTANT: Avoid onChange on a non-Equatable (CLLocation?); use a publisher instead.
+        .onReceive(locationManager.$currentLocation) { loc in
+            guard !didCenterOnInitialLocation, let loc else { return }
+            didCenterOnInitialLocation = true
+            print("[map] 📍 Location available (publisher), using anchor-based positioning")
+            if let coordinator = mapCoordinator {
+                coordinator.updateCamera(
+                    userLocation: loc.coordinate,
+                    zoom: defaultZoom,
+                    bearing: 0.0,
+                    pitch: defaultPitch,
+                    duration: 1.0
+                )
             }
         }
         .onChange(of: dynamicTopPadding) { _, newValue in
@@ -655,15 +582,42 @@ struct ContentView: View {
             UserDefaults.standard.set(newValue, forKey: "depthAmount")
             print("[settings] 🏔️ Saved depthAmount: \(String(format: "%.2f", newValue))")
         }
-        .onChange(of: [userSettings.synthAttack, userSettings.synthDecay, userSettings.synthSustain, userSettings.synthRelease]) { _, newValues in
-            // Update synth ADSR when settings change
+        // Replace array-based onChange (hard for type-checker) with four light ones
+        .onChange(of: userSettings.synthAttack) { _, newValue in
             metalSynth?.updateADSR(
-                attack: newValues[0],
-                decay: newValues[1],
-                sustain: newValues[2],
-                release: newValues[3]
+                attack: newValue,
+                decay: userSettings.synthDecay,
+                sustain: userSettings.synthSustain,
+                release: userSettings.synthRelease
             )
-            print("[settings] 🎛️ Updated synth ADSR from settings")
+            print("[settings] 🎛️ Updated synth ADSR (A)")
+        }
+        .onChange(of: userSettings.synthDecay) { _, newValue in
+            metalSynth?.updateADSR(
+                attack: userSettings.synthAttack,
+                decay: newValue,
+                sustain: userSettings.synthSustain,
+                release: userSettings.synthRelease
+            )
+            print("[settings] 🎛️ Updated synth ADSR (D)")
+        }
+        .onChange(of: userSettings.synthSustain) { _, newValue in
+            metalSynth?.updateADSR(
+                attack: userSettings.synthAttack,
+                decay: userSettings.synthDecay,
+                sustain: newValue,
+                release: userSettings.synthRelease
+            )
+            print("[settings] 🎛️ Updated synth ADSR (S)")
+        }
+        .onChange(of: userSettings.synthRelease) { _, newValue in
+            metalSynth?.updateADSR(
+                attack: userSettings.synthAttack,
+                decay: userSettings.synthDecay,
+                sustain: userSettings.synthSustain,
+                release: newValue
+            )
+            print("[settings] 🎛️ Updated synth ADSR (R)")
         }
         .onChange(of: chatMessages) { _, _ in
             // Save session when chat messages change
@@ -698,10 +652,6 @@ struct ContentView: View {
         }
         .onChange(of: sessionXid) { _, _ in
             // Save session when session ID changes
-            saveSessionData()
-        }
-        .onChange(of: currentXid) { _, _ in
-            // Save session when current XID changes
             saveSessionData()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
@@ -790,7 +740,7 @@ struct ContentView: View {
         compassHeading = heading
         // Only show compass beam when you're actively moving
         showCompassBeam = (locationManager.currentLocation?.speed ?? 0) > 0.3
-        print("[compass] 🧭 Compass beam updated to: \(String(format: "%.1f", heading))°, visible: \(showCompassBeam)")
+        //print("[compass] 🧭 Compass beam updated to: \(String(format: "%.1f", heading))°, visible: \(showCompassBeam)")
     }
     
     private func updateMapBearingFromCompass(_ heading: Double) {
@@ -800,7 +750,7 @@ struct ContentView: View {
            let userLocation = locationManager.currentLocation,
            coordinator.mode == .neon { // Only rotate in neon mode
             isCompassRotating = true
-            coordinator.updateBearingWithUserLocation(heading, userLocation: userLocation.coordinate)
+            coordinator.updateBearing(heading, userLocation: userLocation.coordinate)
             // Live rotating map to compass heading
 
             // Reset flag after rotation completes
@@ -808,7 +758,7 @@ struct ContentView: View {
                 isCompassRotating = false
             }
         } else if mapCoordinator?.mode == .globe {
-            print("[compass] 🌍 Ignoring compass in globe mode - keeping north at top")
+            //print("[compass] 🌍 Ignoring compass in globe mode - keeping north at top")
         }
     }
     
@@ -991,30 +941,45 @@ struct ContentView: View {
     // Walking distance is now calculated and stored in pathStorage.currentDistance
     
     private func zoomToUserLocation() {
-        guard let location = locationManager.currentLocation else {
-            print("[map] ❌ No current location available")
+        // Try LocationManager first, then fall back to MapView's location
+        var coordinate: CLLocationCoordinate2D?
+        var accuracyInfo: String = "unknown"
+
+        if let managerLocation = locationManager.currentLocation {
+            coordinate = managerLocation.coordinate
+            accuracyInfo = "\(managerLocation.horizontalAccuracy)m, age: \(abs(managerLocation.timestamp.timeIntervalSinceNow))s"
+            print("[map] 🎯 Using LocationManager location")
+        } else if let mapViewLocation = mapCoordinator?.mapView?.location.latestLocation {
+            coordinate = mapViewLocation.coordinate
+            accuracyInfo = "\(mapViewLocation.horizontalAccuracy ?? -1)m"
+            print("[map] 🎯 Using MapView's location as fallback")
+        }
+
+        guard let coordinate = coordinate else {
+            print("[map] ❌ No current location available from either source")
             print("[map] 🔍 LocationManager status: \(locationManager.authorizationStatus)")
             print("[map] 🔍 LocationManager isTracking: \(locationManager.isTracking)")
+            print("[map] 🔍 LocationManager currentLocation: \(locationManager.currentLocation?.description ?? "nil")")
             return
         }
-        
-        print("[map] 🎯 Location button pressed - using location: \(location.coordinate)")
-        print("[map] 🎯 Location accuracy: \(location.horizontalAccuracy)m, age: \(abs(location.timestamp.timeIntervalSinceNow))s")
-        
+
+        print("[map] 🎯 Location button pressed - using location: \(coordinate)")
+        print("[map] 🎯 Location accuracy: \(accuracyInfo)")
+
         // Use animated transition if coordinator is available
         if let coordinator = mapCoordinator {
-            coordinator.animateToLocation(location.coordinate)
+            coordinator.animateToLocation(coordinate)
         } else {
             // Fallback to instant transition if coordinator not ready
             print("[map] ⚠️ Coordinator not ready, using instant transition with PRESERVED zoom/bearing/pitch")
             allowViewportUpdate = true
             viewport = .camera(
-                center: location.coordinate, 
+                center: coordinate,
                 zoom: viewport.camera?.zoom ?? defaultZoom,  // Preserve current zoom or default to persistent setting
                 bearing: viewport.camera?.bearing ?? 0.0,  // Preserve current bearing or default to 0
                 pitch: viewport.camera?.pitch ?? defaultPitch  // Preserve current pitch or default to persistent setting
             )
-            
+
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 allowViewportUpdate = false
             }
@@ -1067,4 +1032,127 @@ struct ContentView: View {
     }
     
     // Path tracking is now handled by JourneyPathStorage
+}
+
+// MARK: - Extracted lightweight subviews to help the type checker
+
+private struct DebugHUDView: View {
+    let currentTime: Date
+    let steps: Int
+    let nearestCityText: String
+    let particleCount: Float
+    let emission: Float
+    let actualZoom: Double
+    let actualPitch: Double
+    let activeSkyNotes: Int
+    let activeAudioLayers: Int
+
+    var body: some View {
+        VStack {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(DateFormatter.digitalDate.string(from: currentTime)) \(DateFormatter.digitalTime.string(from: currentTime))")
+                        .font(.custom("Courier New", size: 14)).fontWeight(.bold).foregroundColor(.green)
+                    Text("STEPS TAKEN: \(steps)")
+                        .font(.custom("Courier New", size: 14)).fontWeight(.bold).foregroundColor(.green)
+                    Text(nearestCityText)
+                        .font(.custom("Courier New", size: 14)).fontWeight(.bold).foregroundColor(.green)
+                    Text("PARTICLES: \(String(format: "%.0f", particleCount))")
+                        .font(.system(size: 11, design: .monospaced)).foregroundColor(.pink)
+                    Text("EMISSION: \(String(format: "%.2f", emission))")
+                        .font(.system(size: 11, design: .monospaced)).foregroundColor(.pink)
+                    Text("ZOOM: \(String(format: "%.2f", actualZoom))")
+                        .font(.system(size: 11, design: .monospaced)).foregroundColor(.white)
+                    Text("PITCH: \(String(format: "%.1f", actualPitch))°")
+                        .font(.system(size: 11, design: .monospaced)).foregroundColor(.white)
+                    Text("SYNTH: \(activeSkyNotes) notes")
+                        .font(.system(size: 11, design: .monospaced)).foregroundColor(.cyan)
+                    Text("AUDIO LAYERS: \(activeAudioLayers)")
+                        .font(.system(size: 11, design: .monospaced)).foregroundColor(.yellow)
+                }
+                .padding(8)
+                .background(Color.black.opacity(0.7))
+                .cornerRadius(6)
+                Spacer()
+            }
+            Spacer()
+        }
+    }
+}
+
+private struct TopButtonsRowView: View {
+    @Binding var globeOn: Bool
+    @Binding var showSettingsModal: Bool
+    @Binding var showUserModal: Bool
+    @Binding var mapCoordinator: CustomMapView.Coordinator?
+    @Binding var hologramCoordinator: HologramMetalView.HologramCoordinator?
+    let location: CLLocationCoordinate2D?
+    @Binding var puckScreenPosition: CGPoint
+
+    var body: some View {
+        VStack {
+            HStack(spacing: 5) {
+                Spacer()
+                Button {
+                    globeOn.toggle()
+                    mapCoordinator?.toggleElectrifiedGlobe(userLocation: location)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        if let coordinator = mapCoordinator,
+                           let puck = coordinator.getPuckScreenPosition() {
+                            puckScreenPosition = puck
+                           // print("[puck] 🔄 Force updated puck position after mode change: \(puck)")
+                        }
+                    }
+                } label: {
+                    Image(systemName: globeOn ? "globe.europe.africa.fill" : "globe")
+                        .font(.system(size: 36)).foregroundColor(.white)
+                }
+                .frame(width: 60, height: 60)
+                .background(Color.black.opacity(0.7))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                Button { showSettingsModal = true } label: {
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 36)).foregroundColor(.white)
+                }
+                .frame(width: 60, height: 60)
+                .background(Color.black.opacity(0.7))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                Button { showUserModal = true } label: {
+                    Image(systemName: "person.circle.fill")
+                        .font(.system(size: 36)).foregroundColor(.white)
+                }
+                .frame(width: 60, height: 60)
+                .background(Color.black.opacity(0.7))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            .padding(.trailing, 5)
+            Spacer()
+        }
+    }
+}
+
+private struct EdgeGradients: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            LinearGradient(colors: [.black, .black.opacity(0.5), .clear], startPoint: .top, endPoint: .bottom)
+                .frame(height: 20)
+                .allowsHitTesting(false)
+            Spacer()
+            LinearGradient(colors: [.clear, .black.opacity(0.3), .black.opacity(0.8), .black], startPoint: .top, endPoint: .bottom)
+                .frame(height: 100)
+                .allowsHitTesting(false)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .ignoresSafeArea(.all)
+    }
+}
+
+// MARK: - Lightweight type erasure helper (optional use elsewhere)
+private extension View {
+    @inline(__always)
+    func erased() -> AnyView {
+        AnyView(self)
+    }
 }

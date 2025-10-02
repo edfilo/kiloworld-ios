@@ -34,16 +34,6 @@ struct CustomMapView: UIViewRepresentable {
     let defaultZoom: Double // Default zoom controlled by slider
     let userSettings: UserSettings // User settings for horizon controls
 
-    /// ❌ REMOVE: This function is unused - globe toggle handled directly in ContentView
-    func setElectrifiedGlobeEnabled(_ enabled: Bool) {
-        if enabled {
-            coordinator?.mode = .neon
-            coordinator?.toggleElectrifiedGlobe(userLocation: userLocation)
-        } else {
-            coordinator?.mode = .globe
-            coordinator?.toggleElectrifiedGlobe(userLocation: userLocation)
-        }
-    }
 
     /// ✅ KEEP: Core UIViewRepresentable requirement - creates the MapView
     func makeUIView(context: Context) -> MapView {
@@ -101,6 +91,11 @@ struct CustomMapView: UIViewRepresentable {
             mapView?.applyNeonGridStyle(with: self.userSettings)
             print("[MAP] ⚡ NeonGridStyle application requested")
 
+            // Preload city lights layer on background thread
+            if let mapView = mapView {
+                context.coordinator.preloadCityLightsLayer(mapView: mapView)
+            }
+
             // One-time initial camera so we see something besides the dark background.
             if let mapView = mapView, let coord = mapView.location.latestLocation?.coordinate {
                 context.coordinator.didSetInitialCamera = true
@@ -140,12 +135,12 @@ struct CustomMapView: UIViewRepresentable {
             DispatchQueue.main.async {
                 context.coordinator.setupSkyGateRecognizer(mapView: mapView, metalSynth: metalSynth, onSkyTouchCountChanged: onSkyTouchCountChanged, hologramCoordinator: hologramCoordinator)
             }
-            
+
             // Set up camera observer for debug panel updates and auto-center reset
             context.coordinator.cameraObserver = mapView?.mapboxMap.onCameraChanged.observe { [weak mapView, weak coordinator = context.coordinator] _ in
                 guard let mapView = mapView, let coordinator = coordinator else { return }
                 let cameraState = mapView.mapboxMap.cameraState
-                
+
                 DispatchQueue.main.async {
                     self.onCameraChanged(cameraState)
                     // Only notify about user interaction if this isn't a programmatic bearing change
@@ -153,7 +148,7 @@ struct CustomMapView: UIViewRepresentable {
                     if let lastCamera = coordinator.lastCameraState {
                         let centerChange = cameraState.center.distance(to: lastCamera.center)
                         let zoomChange = abs(cameraState.zoom - lastCamera.zoom)
-                        
+
                         // Only reset auto-center timer if user manually panned/zoomed (not just bearing rotation)
                         if centerChange > 10 || zoomChange > 0.1 {
                             print("[map] 🚨 Triggering user interaction: centerChange=\(String(format: "%.1f", centerChange))m OR zoomChange=\(String(format: "%.3f", zoomChange))")
@@ -165,7 +160,7 @@ struct CustomMapView: UIViewRepresentable {
                     coordinator.lastCameraState = cameraState
                 }
             }
-            
+
             print("[map] 📷 Map setup complete with camera observer for debug updates")
         }
         
@@ -184,11 +179,11 @@ struct CustomMapView: UIViewRepresentable {
         context.coordinator.dynamicBottomPadding = dynamicBottomPadding
         context.coordinator.defaultPitch = defaultPitch
         context.coordinator.defaultZoom = defaultZoom
+        context.coordinator.userSettings = userSettings
         
-        // Update viewport when SwiftUI state changes
-        context.coordinator.updateViewport(viewport, allowUpdate: allowViewportUpdate)
+        // Note: updateViewport removed - viewport changes now handled directly through updateCamera calls
         context.coordinator.updateUserPath(userPath)
-        context.coordinator.updateUserLocation(userLocation)
+        // Note: updateUserLocation removed - location updates handled automatically by puck
     }
     
     /// ✅ KEEP: Core UIViewRepresentable requirement - creates the coordinator
@@ -210,41 +205,15 @@ struct CustomMapView: UIViewRepresentable {
         var dynamicBottomPadding: Double = 0.0 // Store dynamic bottom padding value
         var defaultPitch: Double = 85.0 // Store default pitch value
         var defaultZoom: Double = 16.0 // Store default zoom value
+        var userSettings: UserSettings = UserSettings() // Store user settings for styling
         var didSetInitialCamera = false
         enum MapMode { case neon, globe }
         var mode: MapMode = .neon
-        
-        /// ⚠️ REVIEW: Complex viewport handling - could be simplified or removed if not used
-        func updateViewport(_ viewport: Viewport, allowUpdate: Bool) {
-            guard mapView != nil else { return }
-            
-            // Only apply viewport changes when explicitly allowed (e.g. location button)
-            if !allowUpdate {
-                print("[map] 🚫 updateViewport blocked to prevent snap-back")
-                return
-            }
-            
-            // Extract camera options from viewport and apply them through our single camera update system
-            let cameraOptions = viewport.camera
-            if let options = cameraOptions, let center = options.center {
-                // Safety check: Don't use invalid (0,0) coordinates from viewport
-                if abs(center.latitude) < 0.001 && abs(center.longitude) < 0.001 {
-                    // Silently ignore placeholder viewport - no need to spam logs
-                    return
-                }
+        var preGlobeLocation: CLLocationCoordinate2D? // Store location before entering globe mode
+        var cityLightsLoaded = false // Track if city lights layer is ready
+        var cityLightsObserver: Cancelable? // Observer for city lights visibility
 
-                print("[map] 📷 Viewport update through single camera system: center=(\(center.latitude), \(center.longitude)), zoom=\(options.zoom ?? 0), pitch=\(options.pitch ?? 0)")
-
-                // Use our single updateCamera function to preserve current values and use padding positioning
-                updateCamera(
-                    userLocation: center,
-                    zoom: options.zoom.map(Double.init), // Convert CGFloat? to Double?
-                    bearing: options.bearing, // Already Double?
-                    pitch: options.pitch.map(Double.init), // Convert CGFloat? to Double?
-                    duration: 0.5
-                )
-            }
-        }
+        // ❌ REMOVED: updateViewport - Complex function that was rarely used and caused potential conflicts
         
         /// ✅ KEEP: Essential for showing user's journey path on the map
         func updateUserPath(_ path: [CLLocationCoordinate2D]) {
@@ -286,12 +255,6 @@ struct CustomMapView: UIViewRepresentable {
             // Journey path updated (\(path.count) points)
         }
          
-        /// ❌ REMOVE: Function does nothing - puck handles location automatically
-        func updateUserLocation(_ location: CLLocationCoordinate2D?) {
-            // Puck should automatically use device location via locationProvider
-            // This function is kept for compatibility but puck handles location internally
-            // Location logging removed to reduce spam
-        }
         
         /// ✅ KEEP: Essential for SkyGate touch interaction system
         func setupSkyGateRecognizer(mapView: MapView?, metalSynth: MetalWavetableSynth?, onSkyTouchCountChanged: @escaping (Int) -> Void, hologramCoordinator: AnyObject?) {
@@ -342,15 +305,10 @@ struct CustomMapView: UIViewRepresentable {
             skyGateRecognizer?.updateMetalSynth(metalSynth)
         }
         
-        /// ❌ REMOVE: Function is disabled and serves no purpose
-        func adjustPitchIfNeeded(mapView: MapView, currentZoom: CGFloat) {
-            // Temporarily disabled to prevent camera snapping
-            print("[map] 🔧 adjustPitchIfNeeded disabled to prevent camera snapping")
-        }
         
         /// ✅ KEEP: Essential for compass-based map rotation
         func updateBearing(_ bearing: Double, userLocation: CLLocationCoordinate2D) {
-            print("[map] 🧭 Updating map bearing to: \(String(format: "%.1f", bearing))°")
+            //print("[map] 🧭 Updating map bearing to: \(String(format: "%.1f", bearing))°")
             updateCamera(userLocation: userLocation, bearing: bearing, duration: 1.0)
         }
         
@@ -434,7 +392,7 @@ struct CustomMapView: UIViewRepresentable {
             // Detailed logging disabled to reduce spam
             
             // Using center + padding approach for reliable puck positioning
-            print("[map] 📏 Using center + padding approach (not anchor) for puck positioning...")
+           // print("[map] 📏 Using center + padding approach (not anchor) for puck positioning...")
             
             mapView.camera.ease(
                 to: cameraOptions,
@@ -447,41 +405,12 @@ struct CustomMapView: UIViewRepresentable {
                 }
             )
             
-            print("[map] ⚓ SINGLE camera update: zoom=\(zoom ?? currentCamera.zoom), bearing=\(String(format: "%.1f", bearing ?? currentCamera.bearing))°, pitch=\(pitch ?? currentCamera.pitch)°")
+           // print("[map] ⚓ SINGLE camera update: zoom=\(zoom ?? currentCamera.zoom), bearing=\(String(format: "%.1f", bearing ?? currentCamera.bearing))°, pitch=\(pitch ?? currentCamera.pitch)°")
         }
         
-        /// ⚠️ REVIEW: Duplicate of updateBearing - could be merged
-        func updateBearingWithUserLocation(_ bearing: Double, userLocation: CLLocationCoordinate2D) {
-            print("[map] 🧭 Rotating map to bearing \(String(format: "%.1f", bearing))°")
-            updateCamera(userLocation: userLocation, bearing: bearing, duration: 0.3)
-        }
         
-        /// ❌ REMOVE: Not used - dynamic padding handled through updateCamera
-        func updateCameraPadding(top: Double) {
-            guard let mapView = mapView else { 
-                print("[map] ❌ MapView is nil in updateCameraPadding")
-                return 
-            }
-            
-            // We need a user location for our single camera update system
-            let currentCamera = mapView.mapboxMap.cameraState
-            let userLocation = currentCamera.center
-            
-            print("[map] 📏 Updating camera padding through single camera system: top=\(top)px")
-            
-            // Use our single updateCamera function to preserve current values and use anchor positioning
-            updateCamera(
-                userLocation: userLocation,
-                padding: UIEdgeInsets(top: top, left: 0, bottom: 0, right: 0),
-                duration: 0.3
-            )
-        }
         
-        /// ⚠️ REVIEW: Simple wrapper around updateCamera - could be inlined
-        func updateCameraZoom(_ zoom: Double, userLocation: CLLocationCoordinate2D) {
-            print("[map] 🔍 Updating camera zoom to: \(String(format: "%.1f", zoom))")
-            updateCamera(userLocation: userLocation, zoom: zoom, duration: 0.5)
-        }
+        // ❌ REMOVED: updateCameraZoom - Simple wrapper that can be replaced with direct updateCamera calls
         
         /// ✅ KEEP: Essential for location button functionality
         func animateToLocation(_ coordinate: CLLocationCoordinate2D) {
@@ -520,11 +449,6 @@ struct CustomMapView: UIViewRepresentable {
             }
         }
         
-        /// ⚠️ REVIEW: Rarely used function - could be merged with animateToLocation
-        func continuouslyCenterOnUser(_ coordinate: CLLocationCoordinate2D) {
-            print("[map] 🎯 Continuously centering user")
-            updateCamera(userLocation: coordinate, duration: 1.5)
-        }
 
         /// ✅ KEEP: Essential for updating neon style when user settings change
         func reapplyNeonGridStyle(with userSettings: UserSettings) {
@@ -536,6 +460,8 @@ struct CustomMapView: UIViewRepresentable {
             mapView.applyNeonGridStyle(with: userSettings)
         }
 
+        // MARK: - Globe Mode Functions
+
         /// ✅ KEEP: Essential for globe mode functionality
         func toggleElectrifiedGlobe(userLocation: CLLocationCoordinate2D?) {
             switch mode {
@@ -544,395 +470,291 @@ struct CustomMapView: UIViewRepresentable {
             }
         }
 
-        /// ⚠️ REVIEW: Very complex function with lots of styling code - could be simplified
+        /// Enter globe mode with smooth transition
         private func enterGlobe(userLocation: CLLocationCoordinate2D?) {
             guard let mapView = mapView else { return }
 
-            // 1) Switch to globe projection
-            try? mapView.mapboxMap.style.setProjection(StyleProjection(name: .globe))
+            // 0) Store current location before entering globe mode
+            let currentCamera = mapView.mapboxMap.cameraState
+            preGlobeLocation = userLocation ?? currentCamera.center
+            print("[globe] 💾 Current camera center: \(currentCamera.center)")
+            print("[globe] 💾 Stored pre-globe location: \(preGlobeLocation!)")
+            print("[globe] 💾 Current zoom: \(currentCamera.zoom)")
 
-            // 2) Add city lights / population electrified effect
-            let srcId = "city-lights"
-            let layerId = "city-lights-layer"
-            if !((try? mapView.mapboxMap.style.sourceExists(withId: srcId)) ?? false) {
-
-                // Black Marble TIF needs to be treated as equirectangular and reprojected
-                // For now, we need GDAL conversion to Web Mercator projection
-                print("[lights] ⚠️ Black Marble TIF requires GDAL reprojection from equirectangular to Web Mercator")
-                print("[lights] ⚠️ Cannot display equirectangular projection directly on globe without distortion")
-
-                // Use Black Marble TIF with manual equirectangular correction
-                if let blackMarbleURL = Bundle.main.url(forResource: "BlackMarble_2016_3km_geo", withExtension: "tif") {
-                    var imageSource = ImageSource(id: srcId)
-                    imageSource.url = blackMarbleURL.absoluteString
-                    // Manually correct for equirectangular distortion by limiting latitude range
-                    // This reduces the polar stretching effect
-                    imageSource.coordinates = [
-                        [-180, 70],   // top-left (reduced from 90 to minimize polar distortion)
-                        [180, 70],    // top-right
-                        [180, -70],   // bottom-right (reduced from -90)
-                        [-180, -70]   // bottom-left
-                    ]
-                    try? mapView.mapboxMap.style.addSource(imageSource)
-                    print("[lights] 🖤 Using Black Marble TIF with reduced polar coordinates to minimize distortion")
-                } else {
-                    // Fallback to GIBS tiles
-                    var src = RasterSource(id: srcId)
-                    src.tiles = [
-                        "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/VIIRS_Night_Lights/default/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.png"
-                    ]
-                    src.tileSize = 256
-                    try? mapView.mapboxMap.style.addSource(src)
-                    print("[lights] 🌐 Using GIBS tiles (Black Marble TIF not found)")
-                }
-
-                print("[lights] ✅ City lights source configuration complete")
-
-                var lights = RasterLayer(id: layerId, source: srcId)
-                lights.rasterOpacity = .constant(1.0) // Full opacity to see lights clearly
-                lights.rasterBrightnessMax = .constant(3.0) // Even brighter for TIF visibility
-                lights.rasterBrightnessMin = .constant(0.0) // Dark blacks
-                lights.rasterContrast = .constant(1.5) // Much higher contrast for TIF
-                lights.rasterSaturation = .constant(2.0) // Very saturated
-                print("[lights] 🎛️ Enhanced raster settings for Black Marble visibility")
-
-                // Add layer with error logging - put on top for visibility
-                do {
-                    try mapView.mapboxMap.style.addLayer(lights, layerPosition: .default)
-                    print("[lights] ✨ City lights layer added successfully for electrified effect")
-                } catch {
-                    print("[lights] ❌ Failed to add city lights layer: \(error)")
-                }
-            }
-
-            // 3) Subtle blue atmosphere glow close to Earth, black space
-            var atm = Atmosphere()
-            atm.range = .constant([0.8, 2.0]) // Narrow range - only near Earth
-            atm.color = .constant(StyleColor(UIColor(red: 0.3, green: 0.7, blue: 1.0, alpha: 0.4))) // Subtle cyan-blue
-            atm.highColor = .constant(StyleColor(UIColor(red: 0.1, green: 0.4, blue: 0.8, alpha: 0.3))) // Dimmer blue
-            atm.spaceColor = .constant(StyleColor(.black)) // Pure black space
-            atm.horizonBlend = .constant(0.1) // Subtle glow blend
-            atm.starIntensity = .constant(0.6) // Dim stars
-            try? mapView.mapboxMap.style.setAtmosphere(atm)
-
-            // Darken the base land so city lights pop against dark background
-            do {
-                // Check if land layer exists first
-                let landExists = try mapView.mapboxMap.style.layerExists(withId: "land")
-                print("[lights] 🔍 Land layer exists: \(landExists)")
-
-                if landExists {
-                    try mapView.mapboxMap.style.setLayerProperty(for: "land", property: "fill-color", value: "rgba(20,20,40,1)")
-                    print("[lights] 🌍 Land darkened to show city lights")
-                } else {
-                    print("[lights] ❌ No 'land' layer found - checking available layers...")
-                    // List all available layers to see what we can modify
-                    let allLayers = try mapView.mapboxMap.style.allLayerIdentifiers
-                    print("[lights] 📋 Available layers: \(allLayers.map { $0.id })")
-                }
-            } catch {
-                print("[lights] ⚠️ Could not darken land: \(error)")
-
-                // Try alternative layer names and properties that might control land color
-                let layerAttempts = [
-                    ("background", "background-color"),
-                    ("landuse", "fill-color"),
-                    ("landcover", "fill-color"),
-                    ("natural", "fill-color"),
-                    ("land", "background-color"),
-                    ("water", "fill-color")
-                ]
-
-                for (layerName, property) in layerAttempts {
-                    do {
-                        let exists = try mapView.mapboxMap.style.layerExists(withId: layerName)
-                        if exists {
-                            try mapView.mapboxMap.style.setLayerProperty(for: layerName, property: property, value: "rgba(20,20,40,1)")
-                            print("[lights] 🌍 Darkened \(layerName) layer with \(property)")
-                        } else {
-                            print("[lights] 🔍 Layer \(layerName) not found")
-                        }
-                    } catch {
-                        print("[lights] ⚠️ Failed to modify \(layerName) with \(property): \(error)")
-                    }
-                }
-
-                // Also try to set the overall background to dark
-                try? mapView.mapboxMap.style.setLayerProperty(for: "background", property: "background-color", value: "rgba(10,10,20,1)")
-                print("[lights] 🎨 Attempted to set dark background")
-
-                // Make oceans/water dark blue for contrast with black land
-                do {
-                    let waterExists = try mapView.mapboxMap.style.layerExists(withId: "water")
-                    if waterExists {
-                        try mapView.mapboxMap.style.setLayerProperty(for: "water", property: "fill-color", value: "rgba(0,20,40,1)")
-                        print("[lights] 🌊 Set oceans to dark blue")
-                    } else {
-                        print("[lights] 🔍 No 'water' layer found")
-                    }
-                } catch {
-                    print("[lights] ⚠️ Could not modify water layer: \(error)")
-                }
-
-                // Re-enable dark overlay since we're using GIBS tiles again
-                let overlayId = "dark-land-overlay"
-                let overlayLayerId = "dark-overlay-layer"
-
-                // Remove existing overlay if present to force recreation
-                try? mapView.mapboxMap.style.removeLayer(withId: overlayLayerId)
-                try? mapView.mapboxMap.style.removeSource(withId: overlayId)
-                print("[lights] 🧹 Cleaned existing overlay")
-
-                // Always create new overlay
-                var overlaySource = GeoJSONSource(id: overlayId)
-                // Create a world polygon to cover all land
-                let worldPolygon = """
-                {
-                  "type": "Feature",
-                  "geometry": {
-                    "type": "Polygon",
-                    "coordinates": [[
-                      [-180, -85], [180, -85], [180, 85], [-180, 85], [-180, -85]
-                    ]]
-                  }
-                }
-                """
-                overlaySource.data = .string(worldPolygon)
-                try? mapView.mapboxMap.style.addSource(overlaySource)
-
-                var overlay = FillLayer(id: overlayLayerId, source: overlayId)
-                overlay.fillColor = .constant(StyleColor(UIColor(red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0)))
-                overlay.fillOpacity = .constant(1.0)
-
-                // Add at the very top to ensure it covers everything
-                try? mapView.mapboxMap.style.addLayer(overlay, layerPosition: .default)
-                print("[lights] 🌑 Added dark overlay to cover white continents")
-
-                // Move city lights layer to absolute top
-                try? mapView.mapboxMap.style.moveLayer(withId: "city-lights-layer", to: .default)
-                print("[lights] ⬆️ Moved city lights to top layer")
-
-                // Hide any problematic layers that might show white continents
-                let layersToHide = ["admin-0-boundary", "admin-1-boundary", "country-label", "state-label"]
-                for layerId in layersToHide {
-                    if ((try? mapView.mapboxMap.style.layerExists(withId: layerId)) ?? false) {
-                        try? mapView.mapboxMap.style.setLayerProperty(for: layerId, property: "visibility", value: "none")
-                        print("[lights] 🙈 Hidden layer: \(layerId)")
-                    }
-                }
-            }
-
-            // 4) Enable rotate for spin-the-globe feel
+            // 1) Enable rotate for spin-the-globe feel
             mapView.gestures.options.rotateEnabled = true
 
-            // 5) Fly out to space at maximum zoom-out with globe positioned near bottom
-            let startCenter = CLLocationCoordinate2D(latitude: 0, longitude: 0) // Center on equator and prime meridian
-            let cam = CameraOptions(
-                center: startCenter,
-                padding: UIEdgeInsets(top: 400, left: 0, bottom: 50, right: 0), // Large top padding to push globe down
-                zoom: 0.5, // Maximum zoom out for smallest Earth view
-                bearing: 0,
-                pitch: 0
-            )
-            print("[globe] 🎯 Globe camera: center=(0,0), zoom=0.5 (max out), globe positioned near bottom")
-
-            mapView.camera.fly(to: cam, duration: 6.0, curve: .easeInOut) { [weak self] _ in
-                // Start rotation only after zoom-out animation completes
-                print("[globe] ✅ Zoom-out animation complete, starting rotation")
-                self?.startGlobeRotation()
+            // 2) Start the zoom out animation
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self.startGlobeAnimation(mapView: mapView)
             }
 
             mode = .globe
             print("[globe] 🌍 Entered electrified globe mode")
         }
 
-        /// ⚠️ REVIEW: Very complex function with lots of cleanup code - could be simplified
+        /// Preload city lights layer asynchronously to avoid blocking main thread
+        func preloadCityLightsLayer(mapView: MapView) {
+            guard !cityLightsLoaded else {
+                print("[lights] ℹ️ City lights already loaded, skipping")
+                return
+            }
+
+            print("[lights] 🚀 Starting async preload of city lights layer...")
+
+            // Perform heavy work on background thread
+            DispatchQueue.global(qos: .userInitiated).async { [weak self, weak mapView] in
+                guard let self = self, let mapView = mapView else { return }
+
+                let srcId = "city-lights"
+                let layerId = "city-lights-layer"
+
+                // Check if TIFF file exists
+                guard let blackMarbleURL = Bundle.main.url(forResource: "BlackMarble_2016_3km_geo", withExtension: "tif") else {
+                    print("[lights] ❌ BlackMarble TIFF not found in bundle")
+                    return
+                }
+
+                print("[lights] 📁 Found BlackMarble TIFF at: \(blackMarbleURL.path)")
+
+                // Switch to main thread for MapView operations (Mapbox requires main thread)
+                DispatchQueue.main.async {
+                    let sourceExists = (try? mapView.mapboxMap.sourceExists(withId: srcId)) ?? false
+                    if !sourceExists {
+                        print("[lights] 🎯 Adding Black Marble TIF source on main thread")
+
+                        var imageSource = ImageSource(id: srcId)
+                        imageSource.url = blackMarbleURL.absoluteString
+
+                        // Black Marble TIFF typically covers -180 to 180 longitude, -65 to 75 latitude
+                        // These bounds match the actual data extent of NASA's Black Marble
+                        imageSource.coordinates = [
+                            [-180, 75],    // top-left (west, north)
+                            [180, 75],     // top-right (east, north)
+                            [180, -65],    // bottom-right (east, south)
+                            [-180, -65]    // bottom-left (west, south)
+                        ]
+
+                        do {
+                            try mapView.mapboxMap.addSource(imageSource)
+                            print("[lights] ✅ City lights source added successfully")
+                        } catch {
+                            print("[lights] ❌ Failed to add source: \(error)")
+                            return
+                        }
+
+                        // Add the raster layer
+                        let layerExists = (try? mapView.mapboxMap.layerExists(withId: layerId)) ?? false
+                        if !layerExists {
+                            var rasterLayer = RasterLayer(id: layerId, source: srcId)
+                            rasterLayer.rasterOpacity = .constant(0.0) // Start hidden
+                            rasterLayer.rasterBrightnessMax = .constant(1.0)
+                            rasterLayer.rasterBrightnessMin = .constant(0.0)
+                            rasterLayer.rasterResampling = .constant(.linear) // Better interpolation at different zoom levels
+
+                            do {
+                                try mapView.mapboxMap.addLayer(rasterLayer)
+                                print("[lights] ✅ City lights layer added (hidden, will show at zoom < 4)")
+
+                                // Verify the layer was actually added
+                                let layerExists = (try? mapView.mapboxMap.layerExists(withId: layerId)) ?? false
+                                print("[lights] 🔍 Layer exists after adding: \(layerExists)")
+
+                                // Get current opacity to verify initial state
+                                if let opacity = try? mapView.mapboxMap.layerProperty(for: layerId, property: "raster-opacity") {
+                                    print("[lights] 🔍 Initial opacity: \(opacity)")
+                                }
+
+                                // Mark as loaded
+                                self.cityLightsLoaded = true
+
+                                // Set up camera observer to control visibility
+                                self.setupCityLightsVisibilityObserver(mapView: mapView)
+                            } catch {
+                                print("[lights] ❌ Failed to add layer: \(error)")
+                            }
+                        }
+                    } else {
+                        print("[lights] ℹ️ City lights source already exists")
+                        self.cityLightsLoaded = true
+                        self.setupCityLightsVisibilityObserver(mapView: mapView)
+                    }
+                }
+            }
+        }
+
+        /// Set up observer to control city lights visibility based on zoom level
+        private func setupCityLightsVisibilityObserver(mapView: MapView) {
+            // Cancel existing observer if any
+            cityLightsObserver?.cancel()
+
+            cityLightsObserver = mapView.mapboxMap.onCameraChanged.observe { [weak mapView] _ in
+                guard let mapView = mapView else { return }
+                let camera = mapView.mapboxMap.cameraState
+
+                // Fade in city lights from zoom 7 to 4 (fully visible at 4, fully hidden at 7)
+                let targetOpacity: Double
+                if camera.zoom <= 4.0 {
+                    targetOpacity = 1.0  // Fully visible at zoom 4 and below
+                } else if camera.zoom >= 7.0 {
+                    targetOpacity = 0.0  // Fully hidden at zoom 7 and above
+                } else {
+                    // Linear interpolation between zoom 4 and 7
+                    // At zoom 4: opacity = 1.0
+                    // At zoom 7: opacity = 0.0
+                    targetOpacity = 1.0 - ((camera.zoom - 4.0) / 3.0)
+                }
+
+                if (try? mapView.mapboxMap.layerExists(withId: "city-lights-layer")) == true {
+                    try? mapView.mapboxMap.setLayerProperty(
+                        for: "city-lights-layer",
+                        property: "raster-opacity",
+                        value: targetOpacity
+                    )
+
+                    // Debug logging (only log when zoom is in the transition range)
+                    if camera.zoom >= 3.5 && camera.zoom <= 7.5 {
+                        print("[lights] 💡 Zoom: \(String(format: "%.2f", camera.zoom)), opacity: \(String(format: "%.2f", targetOpacity))")
+                    }
+                }
+            }
+
+            print("[lights] 👁️ City lights visibility observer set up (fade in from zoom 7→4)")
+        }
+
+        /// Helper function to start the globe zoom animation
+        private func startGlobeAnimation(mapView: MapView) {
+            let preZoomCamera = mapView.mapboxMap.cameraState
+            let currentCenter = preGlobeLocation ?? preZoomCamera.center
+
+            print("[globe] 🎯 Starting globe mode from current location: (\(String(format: "%.4f", currentCenter.latitude)), \(String(format: "%.4f", currentCenter.longitude)))")
+
+            // Center the globe to show your continent properly
+            // Use your actual longitude but put it at equator for good global view
+            let globeCenter = CLLocationCoordinate2D(
+                latitude: 0.0, // Equator for balanced north/south view
+                longitude: currentCenter.longitude // Your longitude to show your continent
+            )
+
+            let globePadding = UIEdgeInsets(
+                top: dynamicTopPadding * 1.5,
+                left: 0,
+                bottom: 0,
+                right: 0
+            )
+
+            let spaceCamera = CameraOptions(
+                center: globeCenter,
+                padding: globePadding, // Preserve existing padding
+                zoom: 1.5, // Slightly closer zoom to avoid extreme distortion
+                bearing: 0.0, // North at top
+                pitch: 0 // Flat view for globe
+            )
+
+            // Start animation with progress logging
+            let progressObserver = mapView.mapboxMap.onCameraChanged.observe { [weak mapView] _ in
+                guard let mapView = mapView else { return }
+                let camera = mapView.mapboxMap.cameraState
+
+                // Log animation progress (city lights visibility is now handled by separate observer)
+                if Int(camera.zoom * 10) % 10 == 0 {
+                   // print("[globe] 📍 Animation progress - Lat: \(String(format: "%.4f", camera.center.latitude)), Lon: \(String(format: "%.4f", camera.center.longitude)), Zoom: \(String(format: "%.2f", camera.zoom))")
+                }
+            }
+
+            mapView.camera.fly(to: spaceCamera, duration: 10.0, curve: .easeOut) { [weak self] _ in
+                progressObserver.cancel()
+                print("[globe] ✅ Globe animation complete")
+
+                if let finalCamera = self?.mapView?.mapboxMap.cameraState {
+                    print("[globe] 🏁 Final position - Lat: \(String(format: "%.4f", finalCamera.center.latitude)), Lon: \(String(format: "%.4f", finalCamera.center.longitude)), Zoom: \(String(format: "%.2f", finalCamera.zoom))")
+                }
+            }
+        }
+
+ 
+        /// Exit globe mode and return to neon grid view with smooth animation
         private func exitGlobe(to userLocation: CLLocationCoordinate2D?) {
             guard let mapView = mapView else { return }
 
-            // 0) FIRST - Stop globe rotation immediately to prevent interference
-            stopGlobeRotation()
-            print("[globe] 🛑 Globe rotation stopped before transition")
+            print("[globe] 🛑 All movement timers stopped before transition")
 
-            // 1) Remove city lights layer/source (best-effort)
-            if (try? mapView.mapboxMap.style.layerExists(withId: "city-lights-layer")) == true {
-                try? mapView.mapboxMap.style.removeLayer(withId: "city-lights-layer")
-            }
-            if (try? mapView.mapboxMap.style.sourceExists(withId: "city-lights")) == true {
-                try? mapView.mapboxMap.style.removeSource(withId: "city-lights")
-            }
+            // 1) Clean up globe mode resources
+            cleanupGlobeResources(mapView: mapView)
 
-            // 2) Back to Mercator
-            try? mapView.mapboxMap.style.setProjection(StyleProjection(name: .mercator))
-
-            // 3) Reset atmosphere to defaults first
-            var defaultAtm = Atmosphere()
-            defaultAtm.range = .constant([2.0, 2.4])
-            defaultAtm.color = .constant(StyleColor(UIColor(red: 0.86, green: 0.36, blue: 0.12, alpha: 0.0))) // Disabled
-            defaultAtm.highColor = .constant(StyleColor(.black))
-            defaultAtm.spaceColor = .constant(StyleColor(.black))
-            defaultAtm.horizonBlend = .constant(0.06)
-            defaultAtm.starIntensity = .constant(1.0)
-            try? mapView.mapboxMap.style.setAtmosphere(defaultAtm)
-
-            // 4) Reset water color from globe mode changes
-            do {
-                try mapView.mapboxMap.style.setLayerProperty(for: "water", property: "fill-color", value: "rgba(20, 60, 120, 1.0)")
-                print("[globe] 🔄 Reset water to neon blue")
-            } catch {
-                print("[globe] ⚠️ Could not reset water color: \(error)")
-            }
-
-            // 5) Restore Neon style
-            if let mv = mapView as? MapView {
-                mv.applyNeonGridStyle(with: UserSettings())
-            }
-
-            // 6) Debug road layers and restore golden colors
-            do {
-                let allLayers = try mapView.mapboxMap.style.allLayerIdentifiers
-                let roadLayers = allLayers.filter { $0.id.contains("road") || $0.id.contains("neon") }
-                print("[road-debug] 🔍 Found road layers: \(roadLayers.map { $0.id })")
-
-                // Try to restore all road-related layers
-                for layerId in ["neon-roads-glow", "neon-roads-core", "road", "road-street", "road-primary"] {
-                    if (try? mapView.mapboxMap.style.layerExists(withId: layerId)) == true {
-                        try? mapView.mapboxMap.style.setLayerProperty(for: layerId, property: "line-color", value: "rgba(255, 140, 0, 1.0)")
-                        print("[road-debug] 🧡 Restored golden color for layer: \(layerId)")
-                    }
-                }
-            } catch {
-                print("[globe] ⚠️ Could not restore road colors: \(error)")
-            }
-
-            // 5) Restore gesture prefs
-            mapView.gestures.options.rotateEnabled = false
-
-            // 6) Restore location puck with full configuration
-            let puck2DConfig = Puck2DConfiguration(
-                topImage: nil, // Use default arrow
-                bearingImage: nil,
-                shadowImage: nil,
-                scale: .constant(4.0), // Even larger puck for more presence
-                showsAccuracyRing: true, // Enable accuracy ring for additional glow effect
-                accuracyRingColor: UIColor.cyan.withAlphaComponent(0.3), // Cyan glow ring
-                accuracyRingBorderColor: UIColor.cyan.withAlphaComponent(0.8) // Bright cyan border
-            )
-            let locationOptions = LocationOptions(
-                puckType: .puck2D(puck2DConfig),
-                puckBearing: .heading,
-                puckBearingEnabled: true
-            )
-            mapView.location.options = locationOptions
-            print("[globe] 🎯 Restored full location puck configuration")
-
-            // 6) Fly camera back to app defaults / current user center
-            let current = mapView.mapboxMap.cameraState
-            let targetCenter = userLocation ?? current.center
-
-            print("[globe] 🔄 Exiting globe - flying to defaults:")
-            print("[globe] 🔄 Target zoom: \(defaultZoom) (should be ~16)")
-            print("[globe] 🔄 Target pitch: \(defaultPitch)° (should be ~85°)")
-            print("[globe] 🔄 Target center: (\(targetCenter.latitude), \(targetCenter.longitude))")
-
-            // Add a small delay to ensure all systems (rotation, etc.) have stopped
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                guard let self = self else { return }
-                print("[globe] 🚀 Starting camera transition to neon defaults")
-
-                // Use a faster, more reliable transition
-                self.updateCamera(
-                    userLocation: targetCenter,
-                    zoom: defaultZoom,
-                    bearing: current.bearing, // Keep current bearing to avoid disorientation
-                    pitch: defaultPitch,
-                    duration: 2.0 // Faster transition (was 5.0) to reduce chance of interruption
-                )
-
-                // Add completion callback to ensure zoom reaches target
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
-                    guard let self = self else { return }
-                    let finalCamera = self.mapView?.mapboxMap.cameraState
-                    if let finalZoom = finalCamera?.zoom, abs(finalZoom - defaultZoom) > 0.5 {
-                        print("[globe] ⚠️ Zoom didn't reach target (\(String(format: "%.2f", finalZoom)) vs \(defaultZoom)), correcting...")
-                        self.updateCamera(
-                            userLocation: targetCenter,
-                            zoom: defaultZoom,
-                            pitch: defaultPitch,
-                            duration: 1.0
-                        )
-                    } else {
-                        print("[globe] ✅ Camera transition completed successfully")
-                    }
-                }
-            }
-
-            mode = .neon
-            print("[globe] 💡 Returned to Neon mode")
-
-            // Stop globe rotation when exiting
-            stopGlobeRotation()
+            // 2) Animate back to pre-globe location with defaults
+            let targetLocation = userLocation ?? preGlobeLocation ?? mapView.mapboxMap.cameraState.center
+            animateBackToDefaults(mapView: mapView, targetLocation: targetLocation)
         }
 
-        // MARK: - Globe Rotation
+        // MARK: - Globe Helper Functions
         private var rotationTimer: Timer?
         private var currentRotationBearing: Double = 0.0
 
-        /// ✅ KEEP: Essential for globe rotation animation
-        private func startGlobeRotation() {
-            stopGlobeRotation() // Clean up any existing timer
+ 
 
-            print("[globe] 🔄 Starting globe rotation along Earth's axis (N-S pole)")
 
-            // Rotate the globe slowly along its vertical axis (complete rotation in 60 seconds)
-            rotationTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-                guard let self = self, let mapView = self.mapView else { return }
 
-                // Increment longitude by 0.6 degrees every 0.1 seconds (360° / 60s = 6°/s)
-                // This rotates the globe around its vertical axis (North-South pole)
-                self.currentRotationBearing += 0.6
-                if self.currentRotationBearing >= 360.0 {
-                    self.currentRotationBearing = 0.0
-                }
+        /// Clean up globe mode resources
+        private func cleanupGlobeResources(mapView: MapView) {
+            // DON'T remove city lights layer - let the observer handle visibility based on zoom
+            // The layer should persist and fade in/out automatically as user zooms
+            print("[globe] ℹ️ Keeping city lights layer (will auto-hide at zoom > 7)")
 
-                // Only rotate if in globe mode
-                guard self.mode == .globe else { return }
+            // Back to Mercator projection
+           // try? mapView.mapboxMap.setProjection(StyleProjection(name: .mercator))
 
-                // Calculate new longitude position (rotate around vertical axis)
-                let baseLongitude = 0.0 // Start at prime meridian
-                let rotatedLongitude = baseLongitude + self.currentRotationBearing
-                let normalizedLongitude = rotatedLongitude > 180.0 ? rotatedLongitude - 360.0 : rotatedLongitude
+            // Reset gesture options
+            mapView.gestures.options.rotateEnabled = false
 
-                // Keep camera looking at equator (latitude 0) but rotate longitude
-                let currentCamera = mapView.mapboxMap.cameraState
-                let rotatedCamera = CameraOptions(
-                    center: CLLocationCoordinate2D(latitude: 0.0, longitude: normalizedLongitude),
-                    padding: UIEdgeInsets(top: 400, left: 0, bottom: 50, right: 0), // Maintain bottom positioning during rotation
-                    zoom: currentCamera.zoom,
-                    bearing: 0.0, // Keep north at top
-                    pitch: 0.0    // Keep looking straight down at globe
-                )
-
-                mapView.camera.ease(to: rotatedCamera, duration: 0.2, curve: .linear) { _ in
-                    // Rotation step complete
-                }
-            }
+            print("[globe] 🧹 Globe mode exited (city lights remain active)")
         }
 
-        /// ✅ KEEP: Essential for cleaning up globe rotation
-        private func stopGlobeRotation() {
-            rotationTimer?.invalidate()
-            rotationTimer = nil
-            print("[globe] ⏹️ Stopped globe rotation")
+        /// Animate back to defaults with proper transition
+        private func animateBackToDefaults(mapView: MapView, targetLocation: CLLocationCoordinate2D) {
+            print("[globe] 🎯 Animating back to defaults at location: (\(String(format: "%.4f", targetLocation.latitude)), \(String(format: "%.4f", targetLocation.longitude)))")
+
+            // Use defaults from the coordinator parameters
+            let defaultCamera = CameraOptions(
+                center: targetLocation,
+                padding: UIEdgeInsets(
+                    top: dynamicTopPadding,
+                    left: 0,
+                    bottom: dynamicBottomPadding,
+                    right: 0
+                ),
+                zoom: defaultZoom,  // Use app default zoom
+                bearing: 0,         // Reset to north up
+                pitch: defaultPitch // Use app default pitch
+            )
+
+            // Animate back with proper duration
+            mapView.camera.fly(to: defaultCamera, duration: 8.0, curve: .easeInOut) { [weak self] _ in
+                guard let self = self else { return }
+
+                // Reset atmosphere to defaults
+                var defaultAtm = Atmosphere()
+                defaultAtm.range = .constant([2.0, 2.4])
+                defaultAtm.color = .constant(StyleColor(UIColor(red: 0.86, green: 0.36, blue: 0.12, alpha: 0.0)))
+                defaultAtm.highColor = .constant(StyleColor(.black))
+                defaultAtm.spaceColor = .constant(StyleColor(.black))
+                defaultAtm.horizonBlend = .constant(0.06)
+                defaultAtm.starIntensity = .constant(1.0)
+                try? mapView.mapboxMap.setAtmosphere(defaultAtm)
+
+                // Restore neon style
+                mapView.applyNeonGridStyle(with: self.userSettings)
+
+                // Reset mode
+                self.mode = .neon
+
+                print("[globe] ✅ Successfully returned to neon mode with defaults")
+            }
         }
 
     }
 
-    // CLEANUP SUMMARY:
-    // ❌ REMOVE: setElectrifiedGlobeEnabled, updateUserLocation, adjustPitchIfNeeded, updateCameraPadding
-    // ⚠️ REVIEW: updateViewport (complex), updateBearingWithUserLocation (duplicate), updateCameraZoom (wrapper),
-    //           continuouslyCenterOnUser (rarely used), enterGlobe/exitGlobe (very complex)
-    // ✅ KEEP: Core functions for map functionality, camera control, puck positioning, SkyGate, neon styling, globe toggle
+
 }
 
 // MARK: - NeonGridStyle Implementation
@@ -960,8 +782,7 @@ private final class NeonGridStyler {
     private let streetsSourceId = "neon-streets"
     private let roadsGlowId = "neon-roads-glow"
     private let roadsCoreId = "neon-roads-core"
-    private let beaconsSourceId = "neon-beacons-source"
-
+ 
     private let demSourceId = "mapbox-dem"
 
     private init() {}
@@ -970,23 +791,31 @@ private final class NeonGridStyler {
         let style = mapView.mapboxMap.style
         print("[NEON] 🔥 Applying neon grid with REAL sky/atmosphere + (optional) terrain")
 
-        // 0) Minimize base style clutter but DON'T block engine features (sky/terrain).
+        // 0) Hide unnecessary layers but keep the ones we want to style
         let initialLayers = style.allLayerIdentifiers
-        print("[NEON] 📋 Found \(initialLayers.count) existing layers to hide")
+        print("[NEON] 📋 Found \(initialLayers.count) existing layers to process")
         var hiddenCount = 0
+        let layersToKeep = ["user-path", "water", "landuse", "national-park", "building", "puck", "city-lights-layer", "land"]
+
+        // AGGRESSIVE: Hide ALL layers that might show white, force visibility none for everything except what we explicitly want
         initialLayers.forEach { id in
-            if id.id != "user-path"
-                && !id.id.hasPrefix("neon-")
-                && id.id != "sky"
-                && id.id != "land"          // keep base land layer
-                && id.id != "water"         // keep base water layer
-                && !id.id.contains("label") // keep all labels
-                && !id.id.contains("road-label") {       // keep road labels
+            let shouldKeep = layersToKeep.contains(id.id) ||
+                           id.id.hasPrefix("neon-") ||
+                           id.id.hasPrefix("city-lights") ||  // Keep city lights layer
+                           id.id.contains("label") ||
+                           id.id == "sky" ||
+                           id.id == "land"  // ALWAYS keep land layer so we can set its background-color
+
+            if !shouldKeep {
+                // Force visibility off AND set opacity to 0 for double protection
                 try? style.setLayerProperty(for: id.id, property: "visibility", value: "none")
+                try? style.setLayerProperty(for: id.id, property: "fill-opacity", value: 0.0)
+                try? style.setLayerProperty(for: id.id, property: "line-opacity", value: 0.0)
+                try? style.setLayerProperty(for: id.id, property: "background-opacity", value: 0.0)
                 hiddenCount += 1
             }
         }
-        print("[NEON] 👻 Hid \(hiddenCount) default layers, kept land/water/labels")
+        print("[NEON] 👻 Aggressively hid \(hiddenCount) layers with visibility=none AND opacity=0")
 
         // 2) Streets source (for neon roads)
         if !((try? style.sourceExists(withId: streetsSourceId)) ?? false) {
@@ -999,19 +828,9 @@ private final class NeonGridStyler {
 
 
 
-        // 3) Pure black background instead of sky layer
-        var blackBg = BackgroundLayer(id: "black-sky")
-        blackBg.backgroundColor = .constant(StyleColor(UIColor.red))
-        try? style.addLayer(blackBg)
-        print("[NEON] 🌌 Added pure black background")
-
-        // Water fill (oceans/rivers/lakes) - TEMPORARILY HIDDEN FOR TESTING
-        var waterFill = FillLayer(id: "water-override", source: streetsSourceId)
-        waterFill.sourceLayer = "water"
-        waterFill.fillColor = .constant(StyleColor(UIColor(red: 0.05, green: 0.10, blue: 0.20, alpha: 1.0)))
-        waterFill.fillOpacity = .constant(1.0)  // HIDDEN FOR TESTING
-        try? style.addLayer(waterFill, layerPosition: .above("black-sky"))
-        print("[NEON] 💧 Added water override (HIDDEN FOR TESTING)")
+        // REMOVED: black-sky background layer - not needed since land is transparent
+        // Default Mapbox background should be sufficient
+        print("[NEON] 🌌 Relying on default background (no custom black-sky layer)")
 
 
         // 4) Configurable orange horizon band (true thickness near camera)
@@ -1026,6 +845,8 @@ private final class NeonGridStyler {
         print("[NEON] 🔍 HORIZON DEBUG: clampedWidth = \(clampedWidth)")
         print("[NEON] 🔍 HORIZON DEBUG: final range = [\(startKm), \(startKm + clampedWidth)]")
 
+        // TEMPORARILY COMMENTED OUT ATMOSPHERE TO TEST WHITE LAND ISSUE
+        
         var atm = Atmosphere()
         // A thin band close to the camera: [start, start + width]
         atm.range = .constant([startKm, startKm + clampedWidth])
@@ -1037,33 +858,50 @@ private final class NeonGridStyler {
         atm.highColor = .constant(StyleColor(.black))
         atm.spaceColor = .constant(StyleColor(.black))
         atm.starIntensity = .constant(1.0)
-        
+
         try? style.setAtmosphere(atm)
         print("[NEON] 🟠 Horizon start=\(startKm) km, width=\(clampedWidth) km, feather=\(feather)")
+        
+        print("[NEON] ⚠️ ATMOSPHERE TEMPORARILY DISABLED FOR TESTING")
+
+        // Land layer will be styled below with background-color (it's a background type layer)
+        print("[NEON] 🔍 Land layer will be styled as background layer (not fill)")
 
         // Double-lined roads like the mockup
         print("[NEON] 🛣️ Adding double-lined roads above land/water...")
+
+        // Log all available layers and classes once
+        logAllLayersAndClasses(style: mapView.mapboxMap)
+
+        // Debug land-related layers specifically
+        debugLandLayers(style: mapView.mapboxMap)
 
         // Roads outer glow (widest layer for soft glow)
         var roadsGlow = LineLayer(id: roadsGlowId, source: streetsSourceId)
         roadsGlow.sourceLayer = "road"
         roadsGlow.filter = roadFilter()
-        roadsGlow.minZoom = 6.0
-        roadsGlow.lineColor = .constant(StyleColor(UIColor(red: 1.00, green: 0.62, blue: 0.20, alpha: 0.5))) // brighter warm amber glow
+        roadsGlow.minZoom = 1.0  // Start earlier for smooth transition
+        roadsGlow.lineColor = .constant(StyleColor(UIColor(red: 1.00, green: 0.62, blue: 0.20, alpha: 0.8))) // brighter warm amber glow
         roadsGlow.lineWidth = .expression(widthExp(mult: 3.5))
-        roadsGlow.lineOpacity = .expression(opacityExp(min: 0.15, max: 0.30))
+        roadsGlow.lineOpacity = .expression(opacityExp(min: 0.0, max: 0.30))  // Fade in from 0
         roadsGlow.lineBlur = .constant(10.0)
-        try? style.addLayer(roadsGlow, layerPosition: .above("water-override"))
+        try? style.addLayer(roadsGlow, layerPosition: .above("land"))
         print("[NEON] ✨ roads-glow (outer) added")
 
         // Roads main line (bright orange outer line)
         var roadsOuter = LineLayer(id: roadsCoreId, source: streetsSourceId)
         roadsOuter.sourceLayer = "road"
         roadsOuter.filter = roadFilter()
-        roadsOuter.minZoom = 6.0
+        roadsOuter.minZoom = 1.0  // Start earlier for smooth transition
         roadsOuter.lineColor = .constant(StyleColor(UIColor(red: 1.00, green: 0.75, blue: 0.30, alpha: 1.0))) // brighter orange
         roadsOuter.lineWidth = .expression(widthExp(mult: 1.5))
-        roadsOuter.lineOpacity = .constant(0.95)
+        roadsOuter.lineOpacity = .expression(Exp(.interpolate) {
+            Exp(.linear)
+            Exp(.zoom)
+            4; 0.95    // Invisible at zoom 4
+            6; 0.95   // Full opacity at zoom 6
+            18; 0.95
+        })
         roadsOuter.lineBlur = .constant(0.5)
         try? style.addLayer(roadsOuter, layerPosition: .above(roadsGlowId))
         print("[NEON] 🧡 roads-outer (main line) added")
@@ -1072,10 +910,16 @@ private final class NeonGridStyler {
         var roadsInner = LineLayer(id: "neon-roads-inner", source: streetsSourceId)
         roadsInner.sourceLayer = "road"
         roadsInner.filter = roadFilter()
-        roadsInner.minZoom = 6.0
+        roadsInner.minZoom = 1.0  // Start earlier for smooth transition
         roadsInner.lineColor = .constant(StyleColor(UIColor(red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0))) // black inner line
         roadsInner.lineWidth = .expression(widthExp(mult: 0.8))
-        roadsInner.lineOpacity = .constant(0.9)
+        roadsInner.lineOpacity = .expression(Exp(.interpolate) {
+            Exp(.linear)
+            Exp(.zoom)
+            4; 0.9    // Invisible at zoom 4
+            6; 0.9    // Full opacity at zoom 6
+            18; 0.9
+        })
         roadsInner.lineBlur = .constant(0.0)
         try? style.addLayer(roadsInner, layerPosition: .above(roadsCoreId))
         print("[NEON] 🟫 roads-inner (dark center) added - creates double-line effect")
@@ -1084,10 +928,16 @@ private final class NeonGridStyler {
         var roadsPuckGlow = LineLayer(id: "neon-roads-puck-glow", source: streetsSourceId)
         roadsPuckGlow.sourceLayer = "road"
         roadsPuckGlow.filter = roadFilter()
-        roadsPuckGlow.minZoom = 6.0
+        roadsPuckGlow.minZoom = 1.0  // Start earlier for smooth transition
         roadsPuckGlow.lineColor = .constant(StyleColor(UIColor(red: 0.00, green: 1.00, blue: 1.00, alpha: 1.0))) // Cyan glow
         roadsPuckGlow.lineWidth = .expression(widthExp(mult: 2.0)) // Reduced width to avoid overwhelming roads
-        roadsPuckGlow.lineOpacity = .constant(0.3) // Much lower opacity so golden roads show through
+        roadsPuckGlow.lineOpacity = .expression(Exp(.interpolate) {
+            Exp(.linear)
+            Exp(.zoom)
+            4; 0.3    // Invisible at zoom 4
+            6; 0.3    // Full opacity at zoom 6
+            18; 0.3
+        })
         roadsPuckGlow.lineBlur = .constant(8.0) // Reduced blur radius
         try? style.addLayer(roadsPuckGlow, layerPosition: .above("neon-roads-inner"))
         print("[NEON] ✨ roads-puck-glow added for user location highlight")
@@ -1111,26 +961,83 @@ private final class NeonGridStyler {
         try? style.setLayerProperty(for: roadsCoreId, property: "line-color", value: "rgba(255, 140, 0, 1.0)") // Orange with red tint
         print("[NEON] ✨ Enhanced road colors to golden orange")
 
-        // Apply asphalt texture to land layer (with fallback color)
-        try? style.setLayerProperty(for: "land", property: "background-pattern", value: "asphalt64")
-        try? style.setLayerProperty(for: "land", property: "background-color", value: "rgba(25, 30, 25, 1.0)")
-        print("[NEON] 🏗️ Applied asphalt texture to land layer (fallback: dark green-gray)")
+        // Style the actual existing layers directly
+        // The "land" layer IS the background layer (type: "background")
+        // Set it to black instead of white to fix the white land issue at low zoom
+        do {
+            try style.setLayerProperty(for: "land", property: "background-color", value: "rgba(0, 0, 0, 1.0)")
+            print("[NEON] 🖤 Set land (background) layer to black")
 
-        // Green spaces (parks, grass, etc.)
-        var greenSpace = FillLayer(id: "neon-greenspace", source: streetsSourceId)
-        greenSpace.sourceLayer = "landuse"
-        greenSpace.filter = Exp(.match) {
-            Exp(.get) { "class" }
-            ["park", "cemetery", "grass", "recreation_ground", "golf_course", "pitch"]
-            true
-            false
+            // Verify it was set
+            if let bgColor = try? style.layerProperty(for: "land", property: "background-color") {
+                print("[NEON] 🔍 Verified land background-color: \(bgColor)")
+            }
+        } catch {
+            print("[NEON] ❌ Failed to set land background-color: \(error)")
         }
-        greenSpace.fillColor = .constant(StyleColor(UIColor(red: 0.15, green: 0.4, blue: 0.15, alpha: 1.0)))
-        greenSpace.fillOpacity = .constant(0.8)
-        try? style.addLayer(greenSpace, layerPosition: .above("land"))
-        print("[NEON] 🌱 Added green spaces (parks, grass)")
 
-        // Better blue water
+        // Also try setting it with a zoom expression to ensure it's black at ALL zoom levels
+        try? style.setLayerProperty(for: "land", property: "background-color", value: [
+            "interpolate", ["linear"], ["zoom"],
+            0, "rgba(0, 0, 0, 1.0)",
+            22, "rgba(0, 0, 0, 1.0)"
+        ])
+        print("[NEON] 🖤 Set land background-color with zoom expression (always black)")
+
+        // Also hide any potential base map layers that might show white
+        let baseLayers = ["land-structure-polygon", "land-structure-line", "aeroway-polygon", "aeroway-line"]
+        for layerId in baseLayers {
+            try? style.setLayerProperty(for: layerId, property: "fill-opacity", value: [
+                "interpolate", ["linear"], ["zoom"],
+                0, 0.0,    // Transparent at all zoom levels
+                15, 0.0
+            ])
+            try? style.setLayerProperty(for: layerId, property: "line-opacity", value: [
+                "interpolate", ["linear"], ["zoom"],
+                0, 0.0,    // Transparent at all zoom levels
+                15, 0.0
+            ])
+        }
+
+        // Force hide any other potential white layers
+        let potentialWhiteLayers = ["admin-0-boundary-bg", "admin-1-boundary-bg"]
+        for layerId in potentialWhiteLayers {
+            try? style.setLayerProperty(for: layerId, property: "line-opacity", value: 0.0)
+            try? style.setLayerProperty(for: layerId, property: "visibility", value: "none")
+        }
+
+        print("[NEON] 🌍 Made all land layers fully transparent with zoom expressions")
+
+        // Water layer - keep blue water visible
+        try? style.setLayerProperty(for: "water", property: "fill-color", value: "rgba(20, 60, 120, 1.0)")
+        try? style.setLayerProperty(for: "water", property: "fill-opacity", value: 1.0)
+        print("[NEON] 💧 Styled water layer blue")
+
+        // Just style the existing landuse layer - don't make it transparent!
+        // Green areas (parks, forests, etc) in landuse
+        try? style.setLayerProperty(for: "landuse", property: "fill-color", value: [
+            "case",
+            ["in", ["get", "class"], ["literal", ["park", "cemetery", "grass", "recreation_ground", "golf_course", "pitch", "forest", "wood", "nature_reserve"]]],
+            "rgba(0, 200, 0, 1.0)", // Bright green for green spaces
+            "rgba(0, 0, 0, 0.0)"    // Transparent for other landuse (residential, commercial, etc)
+        ])
+        try? style.setLayerProperty(for: "landuse", property: "fill-opacity", value: 1.0)
+        print("[NEON] 🏞️ Styled landuse layer: green for parks/forests, transparent for other uses")
+
+        // National parks - force bright green at ALL zoom levels
+        try? style.setLayerProperty(for: "national-park", property: "fill-color", value: "rgba(0, 180, 0, 1.0)")
+        try? style.setLayerProperty(for: "national-park", property: "fill-opacity", value: 1.0)
+        print("[NEON] 🌳 Styled national-park layer bright green")
+
+        // Buildings
+        try? style.setLayerProperty(for: "building", property: "fill-color", value: "rgba(40, 40, 40, 1.0)")
+        try? style.setLayerProperty(for: "building", property: "fill-opacity", value: 0.8)
+        print("[NEON] 🏢 Styled building layer")
+
+        // REMOVED: neon-greenspace layer - we now style the existing landuse layer directly
+        // This eliminates redundancy and potential conflicts
+
+        // Water override - keep blue water
         try? style.setLayerProperty(for: "water-override", property: "fill-color", value: "rgba(20, 60, 120, 1.0)")
         try? style.setLayerProperty(for: "water-override", property: "fill-opacity", value: 1.0)
         print("[NEON] 💙 Enhanced water to proper blue")
@@ -1146,9 +1053,20 @@ private final class NeonGridStyler {
 
     // MARK: - Expressions
     private func roadFilter() -> Exp {
-        Exp(.match) {
+        // Include ALL possible road classes for complete coverage
+        let includedClasses = [
+            // Main roads
+            "motorway", "trunk", "primary", "secondary", "tertiary", "street", "service",
+            // Paths and trails
+            "path", "trail", "cycleway", "piste", "steps", "pedestrian", "footway",
+            // Other road types
+            "simple", "rail", "minor", "major", "link", "residential", "unclassified"
+        ]
+        print("[layer] 🛣️ Road filter includes ALL types: \(includedClasses.count) classes")
+
+        return Exp(.match) {
             Exp(.get) { "class" }
-            ["motorway","trunk","primary","secondary","tertiary","street","service"]
+            includedClasses
             true
             false
         }
@@ -1157,7 +1075,9 @@ private final class NeonGridStyler {
         Exp(.interpolate) {
             Exp(.linear)
             Exp(.zoom)
-            10; 0.6 * mult
+            4; 0.3 * mult   // Very thin at low zoom
+            6; 0.6 * mult   // Start visible
+            10; 0.8 * mult
             12; 1.2 * mult
             14; 2.0 * mult
             16; 4.0 * mult
@@ -1168,9 +1088,69 @@ private final class NeonGridStyler {
         Exp(.interpolate) {
             Exp(.linear)
             Exp(.zoom)
-            10; min
-            14; (min + max) * 0.5
+            4; 0.0          // Invisible at zoom 4
+            6; max * 0.7    // Fade in by zoom 6
+            10; max         // Full opacity by zoom 10
             18; max
         }
     }
+
+    // Log all available layers and their source layers/classes
+    private func logAllLayersAndClasses(style: StyleManager) {
+        print("[layer] 🔍 === ALL MAPBOX LAYERS AND CLASSES ===")
+
+        let allLayers = style.allLayerIdentifiers
+        print("[layer] 📋 Total layers found: \(allLayers.count)")
+
+        for layerInfo in allLayers {
+            let layerId = layerInfo.id
+            let layerType = layerInfo.type
+
+            // Just log basic layer information without trying to access complex properties
+            print("[layer] 🎨 \(layerId) | type: \(layerType)")
+        }
+
+        print("[layer] ✅ === END LAYER DUMP ===")
+
+        // Also log available sources
+        print("[layer] 📡 === ALL SOURCES ===")
+        let allSources = style.allSourceIdentifiers
+        for sourceInfo in allSources {
+            print("[layer] 📡 Source: \(sourceInfo.id) | type: \(sourceInfo.type)")
+        }
+        print("[layer] ✅ === END SOURCE DUMP ===")
+    }
+
+    // Debug land-related layers that might be causing white curves
+    private func debugLandLayers(style: StyleManager) {
+        print("[layer] 🌍 === LAND LAYER DEBUG ===")
+
+        let landRelatedNames = ["land", "landuse", "landcover", "background", "natural"]
+
+        for layerName in landRelatedNames {
+            if (try? style.layerExists(withId: layerName)) == true {
+                print("[layer] 🌍 Found layer: \(layerName)")
+
+                // Try to get current properties
+                do {
+                    if let fillColor = try? style.layerProperty(for: layerName, property: "fill-color") {
+                        print("[layer] 🎨 \(layerName) fill-color: \(fillColor)")
+                    }
+                    if let bgColor = try? style.layerProperty(for: layerName, property: "background-color") {
+                        print("[layer] 🎨 \(layerName) background-color: \(bgColor)")
+                    }
+                    if let visibility = try? style.layerProperty(for: layerName, property: "visibility") {
+                        print("[layer] 👁️ \(layerName) visibility: \(visibility)")
+                    }
+                } catch {
+                    print("[layer] ❌ Failed to get properties for \(layerName): \(error)")
+                }
+            } else {
+                print("[layer] 🚫 Layer not found: \(layerName)")
+            }
+        }
+
+        print("[layer] ✅ === END LAND DEBUG ===")
+    }
+
 }
